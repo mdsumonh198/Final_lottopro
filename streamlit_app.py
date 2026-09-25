@@ -20,6 +20,7 @@ import numpy as np
 import io
 import time
 import math
+import textwrap
 from itertools import combinations
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -525,11 +526,11 @@ if opt_res is not None:
         if opt_res.status == SolverStatus.PROVED_OPTIMAL
         else "Valid integer solution found satisfying 100% combinatorial space; branch-and-bound reached iteration/time limit."
         if opt_res.status == SolverStatus.BEST_FOUND
-        else "Mathematically impossible to satisfy active constraints."
+        else "Mathematically impossible to satisfy active compound constraints simultaneously with current solver settings."
     )
 
     st.markdown(
-        f"""
+        textwrap.dedent(f"""
         <div style="background:#0f172a; border:2px solid {'#10b981' if opt_res.status == 'PROVED OPTIMAL' else '#38bdf8' if opt_res.status == 'BEST FOUND' else '#ef4444'}; border-radius:12px; padding:16px; margin-bottom:16px;">
             <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
                 <div>
@@ -547,50 +548,61 @@ if opt_res is not None:
                 </div>
             </div>
         </div>
-        """,
+        """),
         unsafe_allow_html=True
     )
+
+    if opt_res.status == SolverStatus.INFEASIBLE or opt_res.total_tickets == 0:
+        st.warning(
+            "⚠️ **কেন INFEASIBLE (০ টিকিট) হলো? (Why it was Infeasible):**\n\n"
+            "- আপনি সাইডবারে একাধিক কঠিন শর্ত (Compound Targets) একসাথে জুড়ে দিয়েছেন (যেমন: ৫-ম্যাচ $\\ge 1$, ৪-ম্যাচ $\\ge 10$, ৩-ম্যাচ $\\ge 25$, ২-ম্যাচ $\\ge 1$)।\n"
+            "- প্রতিটি ৬-সংখ্যার সম্ভাব্য ড্র-তে একসাথে এতগুলো শর্ত পূরণ করা গাণিতিকভাবে অসম্ভব অথবা ২৫ সেকেন্ডের টাইম লিমিটে সমাধান করা সম্ভব নয়।\n\n"
+            "💡 **সমাধান:**\n"
+            "1. বাম পাশের সাইডবার থেকে অপ্রয়োজনীয় টার্গেটগুলো (যেমন: Tier #2, Tier #3, Tier #4) ডান পাশের `❌` বাটনে ক্লিক করে ডিলিট করে দিন।\n"
+            "2. শুধু **১টি মূল টার্গেট** রাখুন: `Exact Match (k) = 5`, `Min Count (>=) = 1` অথবা `Exact Match (k) = 4`, `Min Count (>=) = 1`।\n"
+            "3. অথবা উপরের ড্রপডাউন থেকে **Preset Scenario** সিলেক্ট করে আবার রান দিন!"
+        )
 
     # 2. Key Metrics Grid
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     with m_col1:
         st.markdown(
-            f"""
+            textwrap.dedent(f"""
             <div class="or-metric-box">
                 <div class="or-metric-val">{opt_res.total_tickets:,}</div>
                 <div class="or-metric-label">Winning Wheel Tickets</div>
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
     with m_col2:
         st.markdown(
-            f"""
+            textwrap.dedent(f"""
             <div class="or-metric-box">
                 <div class="or-metric-val">{opt_res.total_draws_in_universe:,}</div>
                 <div class="or-metric-label">Exhaustive Draws Audited</div>
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
     with m_col3:
         st.markdown(
-            f"""
+            textwrap.dedent(f"""
             <div class="or-metric-box">
                 <div class="or-metric-val">{opt_res.total_iterations} <span style="font-size:1rem; color:#94a3b8;">({opt_res.active_draws_count} cuts)</span></div>
                 <div class="or-metric-label">Cutting Iterations</div>
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
     with m_col4:
         st.markdown(
-            f"""
+            textwrap.dedent(f"""
             <div class="or-metric-box">
                 <div class="or-metric-val">{opt_res.total_time_seconds:.2f}s</div>
                 <div class="or-metric-label">Total Execution Time</div>
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
 
@@ -653,7 +665,7 @@ if opt_res is not None:
 
         balls_markup = "".join([f"<span class='draw-ball'>{num:02d}</span>" for num in worst_draw])
         st.markdown(
-            f"""
+            textwrap.dedent(f"""
             <div style="background:#111827; border:1px solid #1e3a8a; border-radius:10px; padding:12px 16px; margin-bottom:12px;">
                 <div style="color:#93c5fd; font-size:0.78rem; font-weight:800; text-transform:uppercase;">
                     Worst-Case Draw for Exact {target_summ.target_k}-Match:
@@ -663,7 +675,7 @@ if opt_res is not None:
                     Minimum tickets matching exactly {target_summ.target_k}: <strong>{target_summ.worst_case_min}</strong> (Required: ≥ {target_summ.min_count})
                 </div>
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
 

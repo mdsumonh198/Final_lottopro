@@ -165,7 +165,7 @@ def solve_cp_sat_subproblem(
     raw_status = solver.Solve(model)
     solve_duration = time.time() - start_time
 
-    # Strictly map to the 3 valid statuses
+    # Strictly map to valid statuses
     if raw_status == cp_model.OPTIMAL:
         status_label = SolverStatus.PROVED_OPTIMAL
     elif raw_status == cp_model.FEASIBLE:
@@ -173,7 +173,13 @@ def solve_cp_sat_subproblem(
     elif raw_status == cp_model.INFEASIBLE:
         status_label = SolverStatus.INFEASIBLE
     else:
-        status_label = SolverStatus.BEST_FOUND if hint_indices else SolverStatus.INFEASIBLE
+        # TIMEOUT / UNKNOWN: check if a feasible solution was found anyway
+        if solver.ResponseStats().solution_count > 0:
+            status_label = SolverStatus.BEST_FOUND
+        elif hint_indices:
+            status_label = SolverStatus.BEST_FOUND
+        else:
+            status_label = SolverStatus.UNKNOWN
 
     selected_tickets: List[Tuple[int, ...]] = []
     selected_indices: List[int] = []
