@@ -1,0 +1,30 @@
+DEVELOPER BRIEF: Universal Lottery / Combination Optimizer
+
+OBJECTIVE:
+Engineer an exact, production-ready mathematical optimization engine and dashboard for
+arbitrary combinatorial lottery covering problems.
+
+SPECIFICATIONS:
+1. Universal Game Configuration:
+   - Universe: Any contiguous or specified range within 0 to 40.
+   - Ticket Size (k): Integer >= 2.
+   - Draw/Result Size (m): Integer >= 2.
+   - Compound Exact-Match Targets: List of (target_k, min_count) requirements.
+2. Exact Verification:
+   - Target matching strictly exact: (ticket_mask & draw_mask).bit_count() == target_k.
+   - 100% audit against all C(N, m) draws without sampling.
+3. Priority Order:
+   - Priority 1: 100% worst-case guarantee.
+   - Priority 2: Minimum possible tickets.
+   - Priority 3: Match counts as balanced as possible across all results (variance minimization).
+4. Solver Status:
+   - Strictly one of "PROVED OPTIMAL", "BEST FOUND", or "INFEASIBLE".
+5. Algorithm:
+   - Iterative Delayed Constraint Generation (Cutting Plane) loop with candidate expansion.
+   - Two-stage optimization: Stage 1 minimizes ticket count N; Stage 2 minimizes variance
+     keeping N fixed and all constraints satisfied.
+6. Deliverables:
+   - src/core.py, src/verifier.py, src/solver_cp_sat.py, src/optimizer.py, src/__init__.py
+   - app.py (CLI & entry point) and streamlit_app.py (Web UI)
+   - Both CSV and XLSX export support
+   - Multi-solver backend support: OR-Tools CP-SAT, SCIP, Gurobi

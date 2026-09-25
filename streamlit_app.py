@@ -1,0 +1,776 @@
+"""
+Universal Lottery Optimizer Engine - Streamlit Web Interface
+Cutting Plane & Delayed Constraint Generation with OR-Tools, SCIP & Gurobi.
+
+Features & Rules:
+1. Universal User-Defined Parameters (0-40 universe, arbitrary ticket size k, draw size m).
+2. Dynamic Multiple Compound Targets (Exact matching strictly: (mask & rmask).bit_count() == target_k).
+3. 100% Worst-Case Guarantee checked across EVERY possible draw C(v, m) — never sampling.
+4. Solver Status strictly one of: "PROVED OPTIMAL", "BEST FOUND", or "INFEASIBLE".
+5. Optimization Modes: Fast (heuristic) and Exhaustive (attempt PROVED OPTIMAL).
+6. Multi-backend: OR-Tools CP-SAT, SCIP, and Gurobi.
+7. Tertiary Objective: Stage 2 match-count variance balancing across all results.
+8. Real-time complexity estimation & warning with suggested safe range.
+9. Exports: Both CSV and Excel XLSX.
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import io
+import time
+import math
+from itertools import combinations
+from typing import List, Tuple, Dict, Any, Optional
+
+from src.core import (
+    TargetTier,
+    OptimizationMode,
+    SolverBackend,
+    SolverStatus,
+    estimate_problem_complexity,
+    numbers_to_mask,
+)
+from src.verifier import verify_tickets_exhaustive
+from src.optimizer import run_delayed_constraint_generation, OptimizationOutput
+
+# -----------------------------------------------------------------------------
+# 1. Page Configuration & Custom CSS
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Universal Lottery Optimizer (OR-Tools / SCIP / Gurobi)",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+CUSTOM_CSS = """
+<style>
+/* Main Dark Theme Canvas */
+.main, .block-container {
+    background-color: #0b0e14 !important;
+    color: #e2e8f0 !important;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif !important;
+}
+
+/* Status Badges */
+.badge-optimal {
+    display: inline-block;
+    background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+    color: #ffffff;
+    font-weight: 900;
+    font-size: 0.9rem;
+    padding: 6px 16px;
+    border-radius: 9999px;
+    letter-spacing: 0.05em;
+    border: 1.5px solid #34d399;
+    box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
+}
+
+.badge-best-found {
+    display: inline-block;
+    background: linear-gradient(135deg, #0284c7 0%, #38bdf8 100%);
+    color: #ffffff;
+    font-weight: 900;
+    font-size: 0.9rem;
+    padding: 6px 16px;
+    border-radius: 9999px;
+    letter-spacing: 0.05em;
+    border: 1.5px solid #7dd3fc;
+    box-shadow: 0 4px 14px rgba(56, 189, 248, 0.4);
+}
+
+.badge-infeasible {
+    display: inline-block;
+    background: linear-gradient(135deg, #b91c1c 0%, #ef4444 100%);
+    color: #ffffff;
+    font-weight: 900;
+    font-size: 0.9rem;
+    padding: 6px 16px;
+    border-radius: 9999px;
+    letter-spacing: 0.05em;
+    border: 1.5px solid #f87171;
+    box-shadow: 0 4px 14px rgba(239, 68, 68, 0.4);
+}
+
+/* Metric Cards */
+.or-metric-box {
+    background: #111827;
+    border: 1px solid #1f293d;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.or-metric-val {
+    font-size: 1.8rem;
+    font-weight: 900;
+    color: #f8fafc;
+    font-family: ui-monospace, monospace;
+}
+
+.or-metric-label {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-top: 4px;
+}
+
+/* Ball Badges */
+.lotto-ball {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: #1e293b;
+    border: 1.5px solid #475569;
+    color: #f1f5f9;
+    font-weight: 800;
+    font-size: 0.75rem;
+    font-family: ui-monospace, monospace;
+    margin: 2px;
+}
+
+.lotto-ball.hit {
+    background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+    border-color: #34d399;
+    color: #ffffff;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+}
+
+.draw-ball {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: #1e3a8a;
+    border: 2px solid #38bdf8;
+    color: #ffffff;
+    font-weight: 900;
+    font-size: 0.85rem;
+    font-family: ui-monospace, monospace;
+    margin: 3px;
+}
+
+/* Complexity Notice */
+.complexity-box {
+    background: #1e1b4b;
+    border: 1.5px solid #6366f1;
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-top: 10px;
+    font-size: 0.8rem;
+}
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+# -----------------------------------------------------------------------------
+# 2. Session State Initialization
+# -----------------------------------------------------------------------------
+if "targets" not in st.session_state:
+    st.session_state["targets"] = [
+        {"target_k": 5, "min_count": 1},
+        {"target_k": 4, "min_count": 10},
+        {"target_k": 3, "min_count": 25},
+    ]
+
+if "opt_output" not in st.session_state:
+    st.session_state["opt_output"] = None
+
+if "opt_mode" not in st.session_state:
+    st.session_state["opt_mode"] = OptimizationMode.FAST.value
+
+if "solver_backend" not in st.session_state:
+    st.session_state["solver_backend"] = SolverBackend.ORTOOLS.value
+
+if "balance_variance" not in st.session_state:
+    st.session_state["balance_variance"] = True
+
+
+# -----------------------------------------------------------------------------
+# 3. Sidebar - Parameters & Target Configuration
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### ⚙️ Game Universe & Range")
+    st.caption("Universal user-defined integer range, ticket size, and result size.")
+
+    # Presets for quick evaluation
+    presets = {
+        "Custom Configuration": None,
+        "🧪 Small Verified 1–25 (k=6, m=6, 5≥1, 4≥10, 3≥25)": {
+            "min": 1, "max": 25, "k": 6, "m": 6,
+            "targets": [
+                {"target_k": 5, "min_count": 1},
+                {"target_k": 4, "min_count": 10},
+                {"target_k": 3, "min_count": 25},
+            ]
+        },
+        "⚡ Fast Optimal 1–12 (k=6, m=6, 5-match >= 1)": {
+            "min": 1, "max": 12, "k": 6, "m": 6,
+            "targets": [{"target_k": 5, "min_count": 1}]
+        },
+        "🎯 Fantasy 5/14 (k=5, m=5, 4-match >= 1)": {
+            "min": 1, "max": 14, "k": 5, "m": 5,
+            "targets": [{"target_k": 4, "min_count": 1}]
+        },
+        "💎 Exact 4-Match Guarantee 0–11 (k=6, m=6, 4-match >= 1)": {
+            "min": 0, "max": 11, "k": 6, "m": 6,
+            "targets": [{"target_k": 4, "min_count": 1}]
+        },
+    }
+
+    preset_choice = st.selectbox(
+        "Load Preset Scenario:",
+        list(presets.keys()),
+        index=0
+    )
+
+    if preset_choice != "Custom Configuration" and preset_choice != st.session_state.get("last_preset"):
+        p = presets[preset_choice]
+        st.session_state["universe_min"] = p["min"]
+        st.session_state["universe_max"] = p["max"]
+        st.session_state["ticket_size"] = p["k"]
+        st.session_state["draw_size"] = p["m"]
+        st.session_state["targets"] = list(p["targets"])
+        st.session_state["last_preset"] = preset_choice
+        st.rerun()
+
+    # Universe Range (0 to 40)
+    u_col1, u_col2 = st.columns(2)
+    with u_col1:
+        u_min = st.number_input(
+            "Universe Min:",
+            min_value=0,
+            max_value=36,
+            value=st.session_state.get("universe_min", 1),
+            step=1
+        )
+        st.session_state["universe_min"] = int(u_min)
+
+    with u_col2:
+        u_max = st.number_input(
+            "Universe Max:",
+            min_value=int(u_min) + 3,
+            max_value=40,
+            value=st.session_state.get("universe_max", 25),
+            step=1
+        )
+        st.session_state["universe_max"] = int(u_max)
+
+    v_size = int(u_max) - int(u_min) + 1
+    st.info(f"🔢 Total Universe: **{v_size}** numbers ({int(u_min)} to {int(u_max)})")
+
+    # Ticket Size (k) & Draw Size (m)
+    d_col1, d_col2 = st.columns(2)
+    with d_col1:
+        ticket_k = st.number_input(
+            "Ticket Size (k):",
+            min_value=2,
+            max_value=min(v_size, 10),
+            value=min(st.session_state.get("ticket_size", 6), v_size),
+            step=1
+        )
+        st.session_state["ticket_size"] = int(ticket_k)
+
+    with d_col2:
+        draw_m = st.number_input(
+            "Draw Size (m):",
+            min_value=2,
+            max_value=min(v_size, 10),
+            value=min(st.session_state.get("draw_size", 6), v_size),
+            step=1
+        )
+        st.session_state["draw_size"] = int(draw_m)
+
+    # Complexity Pre-Check & Warning
+    comp = estimate_problem_complexity(int(u_min), int(u_max), int(ticket_k), int(draw_m))
+
+    st.markdown(
+        f"""
+        <div style="background:#0f172a; border:1px solid #1e293b; border-radius:8px; padding:10px; margin-top:8px; font-size:0.75rem; font-family:ui-monospace, monospace;">
+            <div>Candidates C({v_size}, {ticket_k}): <strong>{comp.total_candidates:,}</strong></div>
+            <div>Exhaustive Draws C({v_size}, {draw_m}): <strong>{comp.total_draws:,}</strong></div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    if comp.warning_message:
+        st.warning(comp.warning_message)
+
+    st.markdown("---")
+    st.markdown("### 🎯 Compound Exact-Match Targets")
+    st.caption("STRICTLY EXACT match: `(mask & rmask).bit_count() == target_k`")
+
+    # Dynamic Multiple Target Rows
+    current_targets = st.session_state["targets"]
+    max_k_possible = min(int(ticket_k), int(draw_m))
+
+    indices_to_remove = []
+    updated_targets = []
+
+    for idx, tgt in enumerate(current_targets):
+        st.markdown(f"**Target Tier #{idx + 1}**")
+        t_col1, t_col2, t_col3 = st.columns([4, 4, 2])
+
+        with t_col1:
+            t_k = st.number_input(
+                "Exact Match (k)",
+                min_value=1,
+                max_value=max_k_possible,
+                value=min(tgt.get("target_k", max_k_possible), max_k_possible),
+                step=1,
+                key=f"tgt_k_{idx}"
+            )
+        with t_col2:
+            min_c = st.number_input(
+                "Min Count (>=)",
+                min_value=1,
+                max_value=2000,
+                value=max(1, tgt.get("min_count", 1)),
+                step=1,
+                key=f"tgt_min_{idx}"
+            )
+        with t_col3:
+            st.write("")
+            st.write("")
+            if len(current_targets) > 1:
+                if st.button("✕", key=f"del_{idx}", help="Remove this target tier"):
+                    indices_to_remove.append(idx)
+
+        updated_targets.append({"target_k": int(t_k), "min_count": int(min_c)})
+
+    if indices_to_remove:
+        for rem_idx in sorted(indices_to_remove, reverse=True):
+            updated_targets.pop(rem_idx)
+        st.session_state["targets"] = updated_targets
+        st.rerun()
+    else:
+        st.session_state["targets"] = updated_targets
+
+    if st.button("➕ Add Compound Target", use_container_width=True):
+        default_next_k = max(1, current_targets[-1]["target_k"] - 1 if current_targets else max_k_possible)
+        st.session_state["targets"].append({"target_k": default_next_k, "min_count": 1})
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("### ⚡ Optimization Engine Settings")
+
+    # Optimization Mode Selector (Gap 5)
+    opt_mode = st.selectbox(
+        "Optimization Mode:",
+        [OptimizationMode.FAST.value, OptimizationMode.EXHAUSTIVE.value],
+        index=0 if comp.is_large else 1,
+        help="Fast mode uses smart candidate generation for fast convergence. Exhaustive evaluates all combinations to prove mathematical global optimality."
+    )
+    st.session_state["opt_mode"] = opt_mode
+
+    # Solver Backend Selector (Gap 4)
+    backend_options = [SolverBackend.ORTOOLS.value, SolverBackend.SCIP.value, SolverBackend.GUROBI.value]
+    chosen_backend = st.selectbox(
+        "Solver Backend:",
+        backend_options,
+        index=0,
+        help="OR-Tools CP-SAT is the recommended default. SCIP and Gurobi are alternative mathematical programming solvers."
+    )
+    st.session_state["solver_backend"] = chosen_backend
+
+    # Tertiary Objective: Balance Variance Toggle (Gap 1)
+    balance_var = st.checkbox(
+        "Balance Match Counts Across Results (Variance Reduction)",
+        value=st.session_state.get("balance_variance", True),
+        help="Stage 2: After finding minimum tickets N, re-solves to minimize the variance and spread of matches across all draws."
+    )
+    st.session_state["balance_variance"] = balance_var
+
+    max_iters = st.slider("Max Cutting-Plane Iterations:", min_value=5, max_value=60, value=30, step=5)
+    cuts_per_iter = st.slider("Cuts Added per Iteration:", min_value=5, max_value=60, value=30, step=5)
+    time_limit = st.slider("Solver Time Limit / Iter (s):", min_value=5, max_value=120, value=25, step=5)
+    num_workers = st.slider("Parallel Worker Threads:", min_value=1, max_value=8, value=4, step=1)
+
+
+# -----------------------------------------------------------------------------
+# 4. Main Page Header
+# -----------------------------------------------------------------------------
+st.markdown(
+    """
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; border-bottom:1px solid #1e293b; padding-bottom:12px;">
+        <div>
+            <h1 style="font-size:1.8rem; font-weight:900; color:#f8fafc; margin:0;">
+                🛡️ Universal Lottery / Combination Optimizer
+            </h1>
+            <p style="color:#94a3b8; font-size:0.85rem; margin:4px 0 0 0;">
+                Cutting Plane Delayed Constraint Generation & Exhaustive Audit with Google OR-Tools, SCIP & Gurobi
+            </p>
+        </div>
+        <div>
+            <span style="background:#1e293b; color:#38bdf8; font-weight:800; font-size:0.75rem; padding:5px 12px; border-radius:6px; font-family:ui-monospace, monospace; border:1px solid #38bdf8;">
+                100% EXHAUSTIVE GUARANTEE · ZERO ESTIMATION
+            </span>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# Active Target Banner
+target_strings = [
+    f"<span style='color:#38bdf8; font-weight:800;'>Exact {t['target_k']}-Match</span> ≥ <strong style='color:#ffffff;'>{t['min_count']}</strong>"
+    for t in st.session_state["targets"]
+]
+st.markdown(
+    f"""
+    <div style="background:#0f172a; border:1.5px solid #1e3a8a; border-radius:10px; padding:10px 14px; margin-bottom:16px;">
+        <span style="font-size:0.78rem; font-weight:800; color:#93c5fd; text-transform:uppercase; letter-spacing:0.04em;">Active Compound Requirements:</span>
+        <div style="font-size:0.92rem; color:#e2e8f0; margin-top:4px;">
+            {' &nbsp;·&nbsp; '.join(target_strings)}
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# -----------------------------------------------------------------------------
+# 5. Run Optimizer Action
+# -----------------------------------------------------------------------------
+run_col1, run_col2 = st.columns([3, 1])
+with run_col1:
+    execute_btn = st.button("🚀 Run Delayed Constraint Optimizer", type="primary", use_container_width=True)
+with run_col2:
+    if st.button("↺ Reset Results", use_container_width=True):
+        st.session_state["opt_output"] = None
+        st.rerun()
+
+if execute_btn:
+    target_tiers = [TargetTier(target_k=t["target_k"], min_count=t["min_count"]) for t in st.session_state["targets"]]
+    progress_bar = st.progress(0.0)
+    status_placeholder = st.empty()
+
+    def update_progress(info: Dict[str, Any]):
+        it = info.get("iteration", 1)
+        max_it = info.get("max_iterations", max_iters)
+        pct = min(1.0, it / max_it)
+        progress_bar.progress(pct)
+
+        status_text = info.get("status", "Optimizing...")
+        phase = info.get("phase", "")
+        active_cnt = info.get("active_draws", 0)
+        t_cnt = info.get("tickets_count", 0)
+        c_cnt = info.get("candidates_count", 0)
+
+        status_placeholder.markdown(
+            f"""
+            <div style="background:#111827; border:1px solid #374151; border-radius:8px; padding:10px 14px; margin: 8px 0; font-family:ui-monospace, monospace;">
+                <div style="color:#38bdf8; font-weight:800; font-size:0.85rem;">🔄 Iteration {it}/{max_it} · Phase: {phase}</div>
+                <div style="color:#f3f4f6; font-size:0.8rem; margin-top:2px;">{status_text}</div>
+                <div style="color:#9ca3af; font-size:0.75rem; margin-top:4px;">
+                    Active Constraints: <strong>{active_cnt:,}</strong> | Active Candidates: <strong>{c_cnt:,}</strong> | Current Tickets: <strong>{t_cnt:,}</strong>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with st.spinner("Executing Cutting Plane Optimization & 100% Combinatorial Audit..."):
+        try:
+            output: OptimizationOutput = run_delayed_constraint_generation(
+                universe_min=st.session_state["universe_min"],
+                universe_max=st.session_state["universe_max"],
+                ticket_size=st.session_state["ticket_size"],
+                draw_size=st.session_state["draw_size"],
+                targets=target_tiers,
+                mode=st.session_state["opt_mode"],
+                backend="scip" if "scip" in chosen_backend.lower() else "gurobi" if "gurobi" in chosen_backend.lower() else "ortools",
+                max_iterations=max_iters,
+                cuts_per_iteration=cuts_per_iter,
+                solver_time_limit_per_iter=time_limit,
+                num_workers=num_workers,
+                balance_variance=st.session_state["balance_variance"],
+                progress_callback=update_progress
+            )
+            st.session_state["opt_output"] = output
+            progress_bar.progress(1.0)
+            status_placeholder.success("✅ Optimization Process Complete!")
+        except Exception as e:
+            st.error(f"Optimization Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
+# 6. Results Dashboard
+# -----------------------------------------------------------------------------
+opt_res: Optional[OptimizationOutput] = st.session_state.get("opt_output")
+
+if opt_res is not None:
+    st.markdown("---")
+    st.markdown("## 📊 Comprehensive Results Dashboard")
+
+    # 1. Top Status & Highlights Bar
+    badge_class = (
+        "badge-optimal" if opt_res.status == SolverStatus.PROVED_OPTIMAL
+        else "badge-best-found" if opt_res.status == SolverStatus.BEST_FOUND
+        else "badge-infeasible"
+    )
+
+    badge_desc = (
+        "Mathematical proof complete: global minimum lower bound == upper bound."
+        if opt_res.status == SolverStatus.PROVED_OPTIMAL
+        else "Valid integer solution found satisfying 100% combinatorial space; branch-and-bound reached iteration/time limit."
+        if opt_res.status == SolverStatus.BEST_FOUND
+        else "Mathematically impossible to satisfy active constraints."
+    )
+
+    st.markdown(
+        f"""
+        <div style="background:#0f172a; border:2px solid {'#10b981' if opt_res.status == 'PROVED OPTIMAL' else '#38bdf8' if opt_res.status == 'BEST FOUND' else '#ef4444'}; border-radius:12px; padding:16px; margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                <div>
+                    <span class="{badge_class}">{opt_res.status}</span>
+                    <span style="margin-left:10px; font-size:0.8rem; font-weight:700; color:{'#34d399' if opt_res.fully_verified else '#fbbf24'};">
+                        {'✓ 100% EXHAUSTIVELY VERIFIED' if opt_res.fully_verified else '⚠ NOT FULLY VERIFIED'}
+                    </span>
+                    {f"<span style='margin-left:10px; font-size:0.75rem; background:#1e293b; color:#a78bfa; padding:3px 8px; border-radius:4px;'>VARIANCE BALANCED</span>" if opt_res.is_balanced else ""}
+                    <div style="color:#cbd5e1; font-size:0.85rem; margin-top:8px;">{badge_desc}</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:2.2rem; font-weight:900; color:#ffffff; font-family:ui-monospace, monospace;">
+                        {opt_res.total_tickets:,} <span style="font-size:1rem; color:#94a3b8; font-weight:600;">Tickets</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # 2. Key Metrics Grid
+    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+    with m_col1:
+        st.markdown(
+            f"""
+            <div class="or-metric-box">
+                <div class="or-metric-val">{opt_res.total_tickets:,}</div>
+                <div class="or-metric-label">Winning Wheel Tickets</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with m_col2:
+        st.markdown(
+            f"""
+            <div class="or-metric-box">
+                <div class="or-metric-val">{opt_res.total_draws_in_universe:,}</div>
+                <div class="or-metric-label">Exhaustive Draws Audited</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with m_col3:
+        st.markdown(
+            f"""
+            <div class="or-metric-box">
+                <div class="or-metric-val">{opt_res.total_iterations} <span style="font-size:1rem; color:#94a3b8;">({opt_res.active_draws_count} cuts)</span></div>
+                <div class="or-metric-label">Cutting Iterations</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with m_col4:
+        st.markdown(
+            f"""
+            <div class="or-metric-box">
+                <div class="or-metric-val">{opt_res.total_time_seconds:.2f}s</div>
+                <div class="or-metric-label">Total Execution Time</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    # 3. Verification Report per Target Tier
+    if opt_res.verification_summary:
+        st.markdown("### 🛡️ Compound Targets Verification Report")
+        st.caption(f"Evaluated against all {opt_res.total_draws_in_universe:,} draws in C({v_size}, {st.session_state['draw_size']}). No sampling.")
+
+        verif_data = []
+        for k, summ in opt_res.verification_summary.tier_summaries.items():
+            status_text = "PASS ✅" if summ.passed else "FAIL ❌"
+            verif_data.append({
+                "Target Tier": f"Exact {summ.target_k}-Match",
+                "Requirement": f"≥ {summ.min_count}",
+                "Worst-Case Min": summ.worst_case_min,
+                "Best-Case Max": summ.best_case_max,
+                "Average Matches": f"{summ.avg_matches:.3f}",
+                "Std Deviation": f"{summ.std_dev:.3f}",
+                "Worst-Case Result": " ".join(f"{x:02d}" for x in summ.worst_case_draw),
+                "Status": status_text
+            })
+
+        df_verif = pd.DataFrame(verif_data)
+        st.dataframe(df_verif, use_container_width=True, hide_index=True)
+
+        # 4. All Exact-Match Levels Distribution Table
+        if opt_res.verification_summary.all_levels_stats:
+            st.markdown("### 📈 All Exact-Match Levels Distribution (0 to k)")
+            st.caption("Complete breakdown of match counts across every possible combinatorial draw.")
+
+            levels_data = []
+            for lvl, stat in opt_res.verification_summary.all_levels_stats.items():
+                levels_data.append({
+                    "Match Level": f"Exact {stat.match_level}-Match",
+                    "Min Matches": stat.min_matches,
+                    "Max Matches": stat.max_matches,
+                    "Average Matches": f"{stat.avg_matches:.3f}",
+                    "Std Dev (Variance)": f"{stat.std_dev:.3f}",
+                    "Worst-Case Draw": " ".join(f"{x:02d}" for x in stat.worst_case_draw),
+                    "Best-Case Draw": " ".join(f"{x:02d}" for x in stat.best_case_draw),
+                })
+            df_levels = pd.DataFrame(levels_data)
+            st.dataframe(df_levels, use_container_width=True, hide_index=True)
+
+    # 5. Worst-Case Result Inspector
+    st.markdown("### 🔍 Worst-Case Result Inspector")
+    st.caption("Inspect the exact draw where the minimum hit count occurred.")
+
+    if opt_res.verification_summary and opt_res.verification_summary.tier_summaries:
+        inspect_tiers = list(opt_res.verification_summary.tier_summaries.keys())
+        selected_inspect_tier = st.selectbox(
+            "Select Target Tier to Inspect Worst-Case Draw:",
+            inspect_tiers,
+            format_func=lambda k: f"Exact {k}-Match Tier (Worst-Case Min: {opt_res.verification_summary.tier_summaries[k].worst_case_min})"
+        )
+
+        target_summ = opt_res.verification_summary.tier_summaries[selected_inspect_tier]
+        worst_draw = target_summ.worst_case_draw
+        worst_draw_set = set(worst_draw)
+
+        balls_markup = "".join([f"<span class='draw-ball'>{num:02d}</span>" for num in worst_draw])
+        st.markdown(
+            f"""
+            <div style="background:#111827; border:1px solid #1e3a8a; border-radius:10px; padding:12px 16px; margin-bottom:12px;">
+                <div style="color:#93c5fd; font-size:0.78rem; font-weight:800; text-transform:uppercase;">
+                    Worst-Case Draw for Exact {target_summ.target_k}-Match:
+                </div>
+                <div style="margin-top:6px;">{balls_markup}</div>
+                <div style="color:#cbd5e1; font-size:0.8rem; margin-top:6px; font-family:ui-monospace, monospace;">
+                    Minimum tickets matching exactly {target_summ.target_k}: <strong>{target_summ.worst_case_min}</strong> (Required: ≥ {target_summ.min_count})
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        ticket_match_details = []
+        for rank, ticket in enumerate(opt_res.tickets, start=1):
+            overlap = len(set(ticket).intersection(worst_draw_set))
+            ticket_match_details.append({
+                "rank": rank,
+                "ticket": ticket,
+                "overlap": overlap,
+                "hits_tier": overlap == target_summ.target_k
+            })
+
+        tier_hits_count = sum(1 for item in ticket_match_details if item["hits_tier"])
+
+        insp_col1, insp_col2 = st.columns([1, 1])
+        with insp_col1:
+            st.markdown(f"**Tickets hitting EXACTLY {target_summ.target_k} matches on this draw ({tier_hits_count}):**")
+            matching_tickets = [it for it in ticket_match_details if it["hits_tier"]]
+            if matching_tickets:
+                for item in matching_tickets[:15]:
+                    t_balls = "".join([
+                        f"<span class='lotto-ball {'hit' if b in worst_draw_set else ''}'>{b:02d}</span>"
+                        for b in item["ticket"]
+                    ])
+                    st.markdown(f"<div style='margin-bottom:3px;'><code>#{item['rank']:03d}</code> {t_balls}</div>", unsafe_allow_html=True)
+                if len(matching_tickets) > 15:
+                    st.caption(f"... and {len(matching_tickets) - 15} more tickets.")
+            else:
+                st.warning(f"0 tickets matched exactly {target_summ.target_k}.")
+
+        with insp_col2:
+            st.markdown("**Other match count breakdown on this draw:**")
+            counts_on_worst = {}
+            for item in ticket_match_details:
+                m_cnt = item["overlap"]
+                counts_on_worst[m_cnt] = counts_on_worst.get(m_cnt, 0) + 1
+
+            for m_level in sorted(counts_on_worst.keys(), reverse=True):
+                is_target = (m_level == target_summ.target_k)
+                style_prefix = "⭐ " if is_target else "• "
+                st.markdown(f"{style_prefix}Exact **{m_level}** matches: **{counts_on_worst[m_level]}** tickets")
+
+    # 6. One-Click CSV & Excel XLSX Export (Gap 6)
+    st.markdown("---")
+    st.markdown("### 📥 Download Tickets (CSV & Excel XLSX)")
+
+    if opt_res.tickets:
+        export_rows = []
+        for rank, ticket in enumerate(opt_res.tickets, start=1):
+            row_dict = {
+                "Priority_Rank": rank,
+                "Ticket_ID": f"TK-{rank:05d}",
+                "Formatted_Ticket": " ".join(f"{num:02d}" for num in ticket)
+            }
+            for b_idx, b_val in enumerate(ticket, start=1):
+                row_dict[f"Ball_{b_idx}"] = b_val
+            row_dict["Solver_Status"] = opt_res.status
+            export_rows.append(row_dict)
+
+        df_export = pd.DataFrame(export_rows)
+
+        # CSV bytes
+        csv_bytes = df_export.to_csv(index=False).encode("utf-8")
+
+        # Excel XLSX bytes
+        xlsx_buffer = io.BytesIO()
+        with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
+            df_export.to_excel(writer, index=False, sheet_name="Optimal_Tickets")
+        xlsx_bytes = xlsx_buffer.getvalue()
+
+        exp_col1, exp_col2 = st.columns(2)
+        with exp_col1:
+            st.download_button(
+                label=f"📥 Download {opt_res.total_tickets:,} Tickets (CSV)",
+                data=csv_bytes,
+                file_name=f"lottery_optimizer_{opt_res.total_tickets}_tickets.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        with exp_col2:
+            st.download_button(
+                label=f"📊 Download {opt_res.total_tickets:,} Tickets (Excel XLSX)",
+                data=xlsx_bytes,
+                file_name=f"lottery_optimizer_{opt_res.total_tickets}_tickets.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+        with st.expander(f"View All {opt_res.total_tickets:,} Tickets in Browser"):
+            st.dataframe(df_export[["Priority_Rank", "Ticket_ID", "Formatted_Ticket"]], use_container_width=True, hide_index=True)
+
+    # 7. Iteration History Table
+    if opt_res.iteration_history:
+        with st.expander("🔬 View Cutting-Plane Iteration History"):
+            hist_data = []
+            for h in opt_res.iteration_history:
+                hist_data.append({
+                    "Iteration": h.iteration,
+                    "Active Draws": h.num_active_draws,
+                    "Candidate Pool": h.num_candidate_tickets,
+                    "Tickets Solved": h.num_tickets_found,
+                    "Violations Found": h.num_violations,
+                    "Solver Status": h.solver_status,
+                    "Solve Time": f"{h.solve_time_seconds:.2f}s",
+                    "Verify Time": f"{h.verification_time_seconds:.2f}s"
+                })
+            st.dataframe(pd.DataFrame(hist_data), use_container_width=True, hide_index=True)
+else:
+    st.info("👈 Configure universal parameters and compound targets in the sidebar, then click **'Run Delayed Constraint Optimizer'**.")

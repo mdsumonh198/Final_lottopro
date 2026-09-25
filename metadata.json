@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Final-Lottery Wheeling System Analyzer (6/27)",
+  "description": "Operations research covering design analyzer for 6/27 lottery wheeling systems guaranteeing at least one 5-match with Schönheim bound evaluation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
