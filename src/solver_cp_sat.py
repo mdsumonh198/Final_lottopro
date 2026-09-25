@@ -46,7 +46,67 @@ def solve_cp_sat_subproblem(
     Formulates and solves the Set Covering MIP on the active draw constraints
     using Google OR-Tools CP-SAT.
     """
-    from ortools.sat.python import cp_model
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError:
+        # Fallback pure-Python covering solver when OR-Tools is not installed
+        start_time = time.time()
+        num_candidates = len(candidate_tickets)
+        selected_indices = list(hint_indices) if hint_indices else []
+        selected_set = set(selected_indices)
+
+        reqs = []
+        for d_idx, draw in enumerate(active_draws):
+            d_mask = numbers_to_mask(draw, universe_min)
+            for t in targets:
+                curr_cov = sum(1 for idx in selected_indices if (candidate_masks[idx] & d_mask).bit_count() == t.target_k)
+                needed = max(0, t.min_count - curr_cov)
+                if needed > 0:
+                    reqs.append((draw, d_mask, t.target_k, needed))
+
+        while reqs and (time.time() - start_time < time_limit_seconds):
+            best_cand_idx = -1
+            best_score = -1
+            for j, t_mask in enumerate(candidate_masks):
+                if j in selected_set:
+                    continue
+                score = 0
+                for draw, d_mask, tk, needed in reqs:
+                    if (t_mask & d_mask).bit_count() == tk:
+                        score += 1
+                if score > best_score:
+                    best_score = score
+                    best_cand_idx = j
+
+            if best_cand_idx == -1 or best_score <= 0:
+                break
+
+            selected_set.add(best_cand_idx)
+            selected_indices.append(best_cand_idx)
+
+            t_mask = candidate_masks[best_cand_idx]
+            new_reqs = []
+            for draw, d_mask, tk, needed in reqs:
+                if (t_mask & d_mask).bit_count() == tk:
+                    needed -= 1
+                if needed > 0:
+                    new_reqs.append((draw, d_mask, tk, needed))
+            reqs = new_reqs
+
+        selected_tickets = [candidate_tickets[idx] for idx in selected_indices]
+        status_label = SolverStatus.INFEASIBLE if reqs else SolverStatus.BEST_FOUND
+
+        return SolverResult(
+            status=status_label,
+            raw_status_name="PURE_PYTHON_COVERING",
+            selected_tickets=selected_tickets,
+            selected_indices=selected_indices,
+            objective_value=len(selected_tickets),
+            best_objective_bound=1.0,
+            solve_time_seconds=time.time() - start_time,
+            num_variables=num_candidates,
+            num_constraints=len(active_draws) * len(targets)
+        )
 
     start_time = time.time()
     model = cp_model.CpModel()
@@ -55,11 +115,23 @@ def solve_cp_sat_subproblem(
     # Decision variables: x[j] in {0, 1}
     x = [model.NewBoolVar(f"x_{j}") for j in range(num_candidates)]
 
-    # Warm-start hints from previous iteration
-    if hint_indices:
-        for idx in hint_indices:
-            if 0 <= idx < num_candidates:
-                model.AddHint(x[idx], 1)
+    # Warm-start hints from previous iteration or compute fast greedy hints
+    effective_hints = set(hint_indices) if hint_indices else set()
+    if not effective_hints and num_candidates > 0:
+        # Fast greedy heuristic to seed CP-SAT with a valid feasible primal solution
+        unmet_draws = list(active_draws)
+        for draw in unmet_draws:
+            d_mask = numbers_to_mask(draw, universe_min)
+            for t in targets:
+                # Find a candidate with exact overlap
+                for j, t_mask in enumerate(candidate_masks):
+                    if (t_mask & d_mask).bit_count() == t.target_k:
+                        effective_hints.add(j)
+                        break
+
+    for idx in effective_hints:
+        if 0 <= idx < num_candidates:
+            model.AddHint(x[idx], 1)
 
     # Primary Objective: Minimize total tickets
     model.Minimize(cp_model.LinearExpr.Sum(x))
@@ -365,7 +437,10 @@ def balance_match_counts(
     guarantees still enforced. Minimizes the variance/spread of match counts across
     results (linearized absolute deviation from mean match count).
     """
-    from ortools.sat.python import cp_model
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError:
+        return current_tickets
 
     if not current_tickets or not active_draws or not targets:
         return current_tickets

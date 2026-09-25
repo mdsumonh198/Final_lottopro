@@ -207,9 +207,9 @@ def run_delayed_constraint_generation(
     total_possible_candidates = math.comb(v, k)
 
     # Determine candidate generation strategy
-    # Exhaustive mode builds all candidates if <= 100,000
+    # Exhaustive mode builds all candidates if <= 100,000; or any problem where total candidates <= 60,000
     is_exhaustive_mode = (mode == OptimizationMode.EXHAUSTIVE.value or "exhaustive" in mode.lower())
-    use_full_candidates = is_exhaustive_mode and (total_possible_candidates <= 120_000)
+    use_full_candidates = (total_possible_candidates <= 60_000) or (is_exhaustive_mode and total_possible_candidates <= 150_000)
 
     # 1. Build initial seed draws
     all_draws_sample: List[Tuple[int, ...]] = []
