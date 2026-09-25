@@ -36,11 +36,18 @@ class IterationLog:
     num_active_draws: int
     num_candidate_tickets: int
     num_tickets_found: int
-    num_violations: int
-    solve_time_seconds: float
-    verification_time_seconds: float
-    solver_status: str
-    best_bound: float
+    num_violations: int = 0
+    num_violations_added: int = 0
+    solve_time_seconds: float = 0.0
+    verification_time_seconds: float = 0.0
+    solver_status: str = ""
+    best_bound: float = 0.0
+
+    def __post_init__(self):
+        if self.num_violations_added == 0 and self.num_violations != 0:
+            self.num_violations_added = self.num_violations
+        elif self.num_violations == 0 and self.num_violations_added != 0:
+            self.num_violations = self.num_violations_added
 
 
 @dataclass
