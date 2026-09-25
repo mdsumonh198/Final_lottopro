@@ -194,11 +194,33 @@ def run_cli():
     print("=" * 78)
 
 
+def is_streamlit_runtime() -> bool:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_context
+        if get_script_run_context() is not None:
+            return True
+    except Exception:
+        pass
+    try:
+        from streamlit.runtime import exists
+        if exists():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 if __name__ == "__main__":
-    # If run from streamlit command (or without CLI arguments), run streamlit_app
-    # If invoked with command line arguments (e.g. --min, -k, etc.), execute CLI
-    if len(sys.argv) > 1 and not any("streamlit" in arg for arg in sys.argv):
+    import runpy
+
+    # Known CLI specific options for the optimizer
+    cli_flags = {"--min", "--max", "-k", "--ticket-size", "-m", "--draw-size", "--target", "--mode", "--backend", "--balance", "--no-balance", "--export-csv", "--export-xlsx"}
+    has_cli_args = any(arg in cli_flags for arg in sys.argv)
+
+    if has_cli_args and not is_streamlit_runtime():
         run_cli()
     else:
-        # Streamlit web app execution
-        from streamlit_app import *
+        # Streamlit web app execution - execute streamlit_app.py directly in current namespace
+        st_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "streamlit_app.py")
+        runpy.run_path(st_path, run_name="__main__")
+
