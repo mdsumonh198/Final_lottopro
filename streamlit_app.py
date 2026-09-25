@@ -1,39 +1,30 @@
 """
 Universal Lottery Optimizer Engine - Streamlit Web Interface
 Cutting Plane & Delayed Constraint Generation with OR-Tools, SCIP & Gurobi.
-
-Features & Rules:
-1. Universal User-Defined Parameters (0-40 universe, arbitrary ticket size k, draw size m).
-2. Dynamic Multiple Compound Targets (Exact matching strictly: (mask & rmask).bit_count() == target_k).
-3. 100% Worst-Case Guarantee checked across EVERY possible draw C(v, m) — never sampling.
-4. Solver Status strictly one of: "PROVED OPTIMAL", "BEST FOUND", or "INFEASIBLE".
-5. Optimization Modes: Fast (heuristic) and Exhaustive (attempt PROVED OPTIMAL).
-6. Multi-backend: OR-Tools CP-SAT, SCIP, and Gurobi.
-7. Tertiary Objective: Stage 2 match-count variance balancing across all results.
-8. Real-time complexity estimation & warning with suggested safe range.
-9. Exports: Both CSV and Excel XLSX.
+Optimized for Dedicated DigitalOcean VPS Deployment.
 """
 
-import streamlit as st
-import pandas as pd
-import numpy as np
 import io
-import time
 import math
 import textwrap
+import time
 from itertools import combinations
-from typing import List, Tuple, Dict, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import streamlit as st
 
 from src.core import (
-    TargetTier,
     OptimizationMode,
     SolverBackend,
     SolverStatus,
+    TargetTier,
     estimate_problem_complexity,
     numbers_to_mask,
 )
+from src.optimizer import OptimizationOutput, run_delayed_constraint_generation
 from src.verifier import verify_tickets_exhaustive
-from src.optimizer import run_delayed_constraint_generation, OptimizationOutput
 
 # -----------------------------------------------------------------------------
 # 1. Page Configuration & Custom CSS
@@ -42,10 +33,10 @@ st.set_page_config(
     page_title="Universal Lottery Optimizer (OR-Tools / SCIP / Gurobi)",
     page_icon="🛡️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-CUSTOM_CSS = """
+CUSTOM_CSS = textwrap.dedent("""
 <style>
 /* Main Dark Theme Canvas */
 .main, .block-container {
@@ -159,29 +150,17 @@ CUSTOM_CSS = """
     font-family: ui-monospace, monospace;
     margin: 3px;
 }
-
-/* Complexity Notice */
-.complexity-box {
-    background: #1e1b4b;
-    border: 1.5px solid #6366f1;
-    border-radius: 10px;
-    padding: 12px 14px;
-    margin-top: 10px;
-    font-size: 0.8rem;
-}
 </style>
-"""
+""").strip()
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # -----------------------------------------------------------------------------
-# 2. Session State Initialization
+# 2. Session State Initialization (Optimal VPS Defaults)
 # -----------------------------------------------------------------------------
 if "targets" not in st.session_state:
     st.session_state["targets"] = [
-        {"target_k": 5, "min_count": 1},
-        {"target_k": 4, "min_count": 10},
-        {"target_k": 3, "min_count": 25},
+        {"target_k": 5, "min_count": 1}
     ]
 
 if "opt_output" not in st.session_state:
@@ -194,7 +173,7 @@ if "solver_backend" not in st.session_state:
     st.session_state["solver_backend"] = SolverBackend.ORTOOLS.value
 
 if "balance_variance" not in st.session_state:
-    st.session_state["balance_variance"] = True
+    st.session_state["balance_variance"] = False
 
 
 # -----------------------------------------------------------------------------
@@ -207,6 +186,10 @@ with st.sidebar:
     # Presets for quick evaluation
     presets = {
         "Custom Configuration": None,
+        "⚡ Fast Optimal 1–12 (k=6, m=6, 5-match >= 1)": {
+            "min": 1, "max": 12, "k": 6, "m": 6,
+            "targets": [{"target_k": 5, "min_count": 1}]
+        },
         "🧪 Small Verified 1–25 (k=6, m=6, 5≥1, 4≥10, 3≥25)": {
             "min": 1, "max": 25, "k": 6, "m": 6,
             "targets": [
@@ -214,10 +197,6 @@ with st.sidebar:
                 {"target_k": 4, "min_count": 10},
                 {"target_k": 3, "min_count": 25},
             ]
-        },
-        "⚡ Fast Optimal 1–12 (k=6, m=6, 5-match >= 1)": {
-            "min": 1, "max": 12, "k": 6, "m": 6,
-            "targets": [{"target_k": 5, "min_count": 1}]
         },
         "🎯 Fantasy 5/14 (k=5, m=5, 4-match >= 1)": {
             "min": 1, "max": 14, "k": 5, "m": 5,
@@ -251,42 +230,39 @@ with st.sidebar:
         u_min = st.number_input(
             "Universe Min:",
             min_value=0,
-            max_value=36,
+            max_value=39,
             value=st.session_state.get("universe_min", 1),
             step=1
         )
         st.session_state["universe_min"] = int(u_min)
-
     with u_col2:
         u_max = st.number_input(
             "Universe Max:",
-            min_value=int(u_min) + 3,
+            min_value=int(u_min) + 1,
             max_value=40,
-            value=st.session_state.get("universe_max", 25),
+            value=max(int(u_min) + 1, st.session_state.get("universe_max", 25)),
             step=1
         )
         st.session_state["universe_max"] = int(u_max)
 
     v_size = int(u_max) - int(u_min) + 1
-    st.info(f"🔢 Total Universe: **{v_size}** numbers ({int(u_min)} to {int(u_max)})")
 
-    # Ticket Size (k) & Draw Size (m)
-    d_col1, d_col2 = st.columns(2)
-    with d_col1:
+    # Ticket Size k and Draw Size m
+    t_col1, t_col2 = st.columns(2)
+    with t_col1:
         ticket_k = st.number_input(
             "Ticket Size (k):",
             min_value=2,
-            max_value=min(v_size, 10),
+            max_value=min(15, v_size),
             value=min(st.session_state.get("ticket_size", 6), v_size),
             step=1
         )
         st.session_state["ticket_size"] = int(ticket_k)
-
-    with d_col2:
+    with t_col2:
         draw_m = st.number_input(
             "Draw Size (m):",
             min_value=2,
-            max_value=min(v_size, 10),
+            max_value=min(15, v_size),
             value=min(st.session_state.get("draw_size", 6), v_size),
             step=1
         )
@@ -295,15 +271,13 @@ with st.sidebar:
     # Complexity Pre-Check & Warning
     comp = estimate_problem_complexity(int(u_min), int(u_max), int(ticket_k), int(draw_m))
 
-    st.markdown(
-        f"""
-        <div style="background:#0f172a; border:1px solid #1e293b; border-radius:8px; padding:10px; margin-top:8px; font-size:0.75rem; font-family:ui-monospace, monospace;">
-            <div>Candidates C({v_size}, {ticket_k}): <strong>{comp.total_candidates:,}</strong></div>
-            <div>Exhaustive Draws C({v_size}, {draw_m}): <strong>{comp.total_draws:,}</strong></div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    comp_box_html = textwrap.dedent(f"""
+    <div style="background:#0f172a; border:1px solid #1e293b; border-radius:8px; padding:10px; margin-top:8px; font-size:0.75rem; font-family:ui-monospace, monospace;">
+        <div>Candidates C({v_size}, {ticket_k}): <strong>{comp.total_candidates:,}</strong></div>
+        <div>Exhaustive Draws C({v_size}, {draw_m}): <strong>{comp.total_draws:,}</strong></div>
+    </div>
+    """).strip()
+    st.markdown(comp_box_html, unsafe_allow_html=True)
 
     if comp.warning_message:
         st.warning(comp.warning_message)
@@ -364,9 +338,9 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.markdown("### ⚡ Optimization Engine Settings")
+    st.markdown("### ⚡ Optimization Engine Settings (VPS Defaults)")
 
-    # Optimization Mode Selector (Gap 5)
+    # Optimization Mode Selector
     opt_mode = st.selectbox(
         "Optimization Mode:",
         [OptimizationMode.FAST.value, OptimizationMode.EXHAUSTIVE.value],
@@ -375,7 +349,7 @@ with st.sidebar:
     )
     st.session_state["opt_mode"] = opt_mode
 
-    # Solver Backend Selector (Gap 4)
+    # Solver Backend Selector
     backend_options = [SolverBackend.ORTOOLS.value, SolverBackend.SCIP.value, SolverBackend.GUROBI.value]
     chosen_backend = st.selectbox(
         "Solver Backend:",
@@ -385,60 +359,57 @@ with st.sidebar:
     )
     st.session_state["solver_backend"] = chosen_backend
 
-    # Tertiary Objective: Balance Variance Toggle (Gap 1)
+    # Tertiary Objective: Balance Variance Toggle (default False for VPS stability)
     balance_var = st.checkbox(
         "Balance Match Counts Across Results (Variance Reduction)",
-        value=st.session_state.get("balance_variance", True),
-        help="Stage 2: After finding minimum tickets N, re-solves to minimize the variance and spread of matches across all draws."
+        value=st.session_state.get("balance_variance", False),
+        help="Stage 2: Re-solves to minimize match variance across draws. Keep unchecked for faster solve and lower risk of infeasibility."
     )
     st.session_state["balance_variance"] = balance_var
 
-    max_iters = st.slider("Max Cutting-Plane Iterations:", min_value=5, max_value=60, value=30, step=5)
+    # Sliders: Max Iters default 50, Workers default 4
+    max_iters = st.slider("Max Cutting-Plane Iterations:", min_value=5, max_value=100, value=50, step=5)
     cuts_per_iter = st.slider("Cuts Added per Iteration:", min_value=5, max_value=60, value=30, step=5)
     time_limit = st.slider("Solver Time Limit / Iter (s):", min_value=5, max_value=120, value=25, step=5)
-    num_workers = st.slider("Parallel Worker Threads:", min_value=1, max_value=8, value=4, step=1)
+    num_workers = st.slider("Parallel Worker Threads:", min_value=1, max_value=16, value=4, step=1)
 
 
 # -----------------------------------------------------------------------------
 # 4. Main Page Header
 # -----------------------------------------------------------------------------
-st.markdown(
-    """
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; border-bottom:1px solid #1e293b; padding-bottom:12px;">
-        <div>
-            <h1 style="font-size:1.8rem; font-weight:900; color:#f8fafc; margin:0;">
-                🛡️ Universal Lottery / Combination Optimizer
-            </h1>
-            <p style="color:#94a3b8; font-size:0.85rem; margin:4px 0 0 0;">
-                Cutting Plane Delayed Constraint Generation & Exhaustive Audit with Google OR-Tools, SCIP & Gurobi
-            </p>
-        </div>
-        <div>
-            <span style="background:#1e293b; color:#38bdf8; font-weight:800; font-size:0.75rem; padding:5px 12px; border-radius:6px; font-family:ui-monospace, monospace; border:1px solid #38bdf8;">
-                100% EXHAUSTIVE GUARANTEE · ZERO ESTIMATION
-            </span>
-        </div>
+header_html = textwrap.dedent("""
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; border-bottom:1px solid #1e293b; padding-bottom:12px;">
+    <div>
+        <h1 style="font-size:1.8rem; font-weight:900; color:#f8fafc; margin:0;">
+            🛡️ Universal Lottery / Combination Optimizer
+        </h1>
+        <p style="color:#94a3b8; font-size:0.85rem; margin:4px 0 0 0;">
+            Cutting Plane Delayed Constraint Generation & Exhaustive Audit with Google OR-Tools, SCIP & Gurobi
+        </p>
     </div>
-    """,
-    unsafe_allow_html=True
-)
+    <div>
+        <span style="background:#1e293b; color:#38bdf8; font-weight:800; font-size:0.75rem; padding:5px 12px; border-radius:6px; font-family:ui-monospace, monospace; border:1px solid #38bdf8;">
+            100% EXHAUSTIVE GUARANTEE · ZERO ESTIMATION
+        </span>
+    </div>
+</div>
+""").strip()
+st.markdown(header_html, unsafe_allow_html=True)
 
 # Active Target Banner
 target_strings = [
     f"<span style='color:#38bdf8; font-weight:800;'>Exact {t['target_k']}-Match</span> ≥ <strong style='color:#ffffff;'>{t['min_count']}</strong>"
     for t in st.session_state["targets"]
 ]
-st.markdown(
-    f"""
-    <div style="background:#0f172a; border:1.5px solid #1e3a8a; border-radius:10px; padding:10px 14px; margin-bottom:16px;">
-        <span style="font-size:0.78rem; font-weight:800; color:#93c5fd; text-transform:uppercase; letter-spacing:0.04em;">Active Compound Requirements:</span>
-        <div style="font-size:0.92rem; color:#e2e8f0; margin-top:4px;">
-            {' &nbsp;·&nbsp; '.join(target_strings)}
-        </div>
+banner_html = textwrap.dedent(f"""
+<div style="background:#0f172a; border:1.5px solid #1e3a8a; border-radius:10px; padding:10px 14px; margin-bottom:16px;">
+    <span style="font-size:0.78rem; font-weight:800; color:#93c5fd; text-transform:uppercase; letter-spacing:0.04em;">Active Compound Requirements:</span>
+    <div style="font-size:0.92rem; color:#e2e8f0; margin-top:4px;">
+        {' &nbsp;·&nbsp; '.join(target_strings)}
     </div>
-    """,
-    unsafe_allow_html=True
-)
+</div>
+""").strip()
+st.markdown(banner_html, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
 # 5. Run Optimizer Action
@@ -468,18 +439,16 @@ if execute_btn:
         t_cnt = info.get("tickets_count", 0)
         c_cnt = info.get("candidates_count", 0)
 
-        status_placeholder.markdown(
-            f"""
-            <div style="background:#111827; border:1px solid #374151; border-radius:8px; padding:10px 14px; margin: 8px 0; font-family:ui-monospace, monospace;">
-                <div style="color:#38bdf8; font-weight:800; font-size:0.85rem;">🔄 Iteration {it}/{max_it} · Phase: {phase}</div>
-                <div style="color:#f3f4f6; font-size:0.8rem; margin-top:2px;">{status_text}</div>
-                <div style="color:#9ca3af; font-size:0.75rem; margin-top:4px;">
-                    Active Constraints: <strong>{active_cnt:,}</strong> | Active Candidates: <strong>{c_cnt:,}</strong> | Current Tickets: <strong>{t_cnt:,}</strong>
-                </div>
+        p_html = textwrap.dedent(f"""
+        <div style="background:#111827; border:1px solid #374151; border-radius:8px; padding:10px 14px; margin: 8px 0; font-family:ui-monospace, monospace;">
+            <div style="color:#38bdf8; font-weight:800; font-size:0.85rem;">🔄 Iteration {it}/{max_it} · Phase: {phase}</div>
+            <div style="color:#f3f4f6; font-size:0.8rem; margin-top:2px;">{status_text}</div>
+            <div style="color:#9ca3af; font-size:0.75rem; margin-top:4px;">
+                Active Constraints: <strong>{active_cnt:,}</strong> | Active Candidates: <strong>{c_cnt:,}</strong> | Current Tickets: <strong>{t_cnt:,}</strong>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
+        </div>
+        """).strip()
+        status_placeholder.markdown(p_html, unsafe_allow_html=True)
 
     with st.spinner("Executing Cutting Plane Optimization & 100% Combinatorial Audit..."):
         try:
@@ -514,7 +483,6 @@ if opt_res is not None:
     st.markdown("---")
     st.markdown("## 📊 Comprehensive Results Dashboard")
 
-    # 1. Top Status & Highlights Bar
     badge_class = (
         "badge-optimal" if opt_res.status == SolverStatus.PROVED_OPTIMAL
         else "badge-best-found" if opt_res.status == SolverStatus.BEST_FOUND
@@ -529,39 +497,63 @@ if opt_res is not None:
         else "Mathematically impossible to satisfy active compound constraints simultaneously with current solver settings."
     )
 
-    st.markdown(
-        textwrap.dedent(f"""
-        <div style="background:#0f172a; border:2px solid {'#10b981' if opt_res.status == 'PROVED OPTIMAL' else '#38bdf8' if opt_res.status == 'BEST FOUND' else '#ef4444'}; border-radius:12px; padding:16px; margin-bottom:16px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
-                <div>
-                    <span class="{badge_class}">{opt_res.status}</span>
-                    <span style="margin-left:10px; font-size:0.8rem; font-weight:700; color:{'#34d399' if opt_res.fully_verified else '#fbbf24'};">
-                        {'✓ 100% EXHAUSTIVELY VERIFIED' if opt_res.fully_verified else '⚠ NOT FULLY VERIFIED'}
-                    </span>
-                    {f"<span style='margin-left:10px; font-size:0.75rem; background:#1e293b; color:#a78bfa; padding:3px 8px; border-radius:4px;'>VARIANCE BALANCED</span>" if opt_res.is_balanced else ""}
-                    <div style="color:#cbd5e1; font-size:0.85rem; margin-top:8px;">{badge_desc}</div>
+    status_border_color = (
+        "#10b981" if opt_res.status == SolverStatus.PROVED_OPTIMAL
+        else "#38bdf8" if opt_res.status == SolverStatus.BEST_FOUND
+        else "#ef4444"
+    )
+
+    status_card_html = textwrap.dedent(f"""
+    <div style="background:#0f172a; border:2px solid {status_border_color}; border-radius:12px; padding:16px; margin-bottom:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div>
+                <span class="{badge_class}">{opt_res.status}</span>
+                <span style="margin-left:10px; font-size:0.8rem; font-weight:700; color:{'#34d399' if opt_res.fully_verified else '#fbbf24'};">
+                    {'✓ 100% EXHAUSTIVELY VERIFIED' if opt_res.fully_verified else '⚠ NOT FULLY VERIFIED'}
+                </span>
+                {f"<span style='margin-left:10px; font-size:0.75rem; background:#1e293b; color:#a78bfa; padding:3px 8px; border-radius:4px;'>VARIANCE BALANCED</span>" if opt_res.is_balanced else ""}
+                <div style="color:#cbd5e1; font-size:0.85rem; margin-top:8px;">{badge_desc}</div>
+            </div>
+            <div style="text-align:right;">
+                <div style="font-size:2.2rem; font-weight:900; color:#ffffff; font-family:ui-monospace, monospace;">
+                    {opt_res.total_tickets:,} <span style="font-size:1rem; color:#94a3b8; font-weight:600;">Tickets</span>
                 </div>
-                <div style="text-align:right;">
-                    <div style="font-size:2.2rem; font-weight:900; color:#ffffff; font-family:ui-monospace, monospace;">
-                        {opt_res.total_tickets:,} <span style="font-size:1rem; color:#94a3b8; font-weight:600;">Tickets</span>
+            </div>
+        </div>
+    </div>
+    """).strip()
+    st.markdown(status_card_html, unsafe_allow_html=True)
+
+    # Robust Guidance Alert for INFEASIBLE Results
+    if opt_res.status == SolverStatus.INFEASIBLE or opt_res.total_tickets == 0:
+        infeasible_alert_html = textwrap.dedent("""
+        <div style="background: linear-gradient(135deg, rgba(239, 68, 68, 0.14) 0%, rgba(185, 28, 28, 0.24) 100%); border: 1.5px solid #ef4444; border-radius: 12px; padding: 18px 22px; margin: 16px 0; box-shadow: 0 4px 16px rgba(239, 68, 68, 0.25);">
+            <div style="display:flex; align-items:flex-start; gap:14px;">
+                <div style="font-size:1.8rem; line-height:1;">⚠️</div>
+                <div style="flex:1;">
+                    <div style="font-size:1.12rem; font-weight:800; color:#fca5a5; margin-bottom:6px;">
+                        Optimization Infeasible: No Valid Ticket Set Satisfies Active Constraints
+                    </div>
+                    <div style="color:#e2e8f0; font-size:0.88rem; line-height:1.55; margin-bottom:12px;">
+                        The mathematical solver (CP-SAT / MIP) determined that it is either combinatorial impossibility to satisfy all required target tiers simultaneously on every single draw, or the solver reached its time limit before finding a feasible integer solution.
+                    </div>
+                    <div style="background:#0b0f19; border-radius:8px; padding:12px 16px; border:1px solid #1e293b;">
+                        <div style="font-weight:700; color:#38bdf8; font-size:0.84rem; margin-bottom:6px;">
+                            🔧 Recommended Actions to Resolve Infeasibility:
+                        </div>
+                        <ul style="margin:0; padding-left:18px; color:#cbd5e1; font-size:0.82rem; line-height:1.65;">
+                            <li><strong>Relax Compound Constraints:</strong> If multiple target tiers are active (e.g. 5≥1, 4≥10, 3≥25), delete secondary tiers using the <strong>✕</strong> button in the sidebar. Start with a single primary requirement (e.g. Exact 5-Match ≥ 1 or 4-Match ≥ 1).</li>
+                            <li><strong>Keep Variance Balancing Disabled:</strong> Ensure <em>"Balance Match Counts Across Results (Variance Reduction)"</em> remains unchecked (OFF).</li>
+                            <li><strong>Extend Solver Time Limit:</strong> For universes larger than 20 numbers, increase <em>"Solver Time Limit / Iter"</em> from 25s to 60s or 90s.</li>
+                            <li><strong>Use Fast Heuristic Mode:</strong> Switch Optimization Mode to <em>"Fast (heuristic, BEST FOUND likely)"</em> for efficient candidate generation.</li>
+                            <li><strong>Verify Range:</strong> Ensure Ticket Size (k) and Draw Size (m) do not exceed the universe range (Max - Min + 1).</li>
+                        </ul>
                     </div>
                 </div>
             </div>
         </div>
-        """),
-        unsafe_allow_html=True
-    )
-
-    if opt_res.status == SolverStatus.INFEASIBLE or opt_res.total_tickets == 0:
-        st.warning(
-            "⚠️ **কেন INFEASIBLE (০ টিকিট) হলো? (Why it was Infeasible):**\n\n"
-            "- আপনি সাইডবারে একাধিক কঠিন শর্ত (Compound Targets) একসাথে জুড়ে দিয়েছেন (যেমন: ৫-ম্যাচ $\\ge 1$, ৪-ম্যাচ $\\ge 10$, ৩-ম্যাচ $\\ge 25$, ২-ম্যাচ $\\ge 1$)।\n"
-            "- প্রতিটি ৬-সংখ্যার সম্ভাব্য ড্র-তে একসাথে এতগুলো শর্ত পূরণ করা গাণিতিকভাবে অসম্ভব অথবা ২৫ সেকেন্ডের টাইম লিমিটে সমাধান করা সম্ভব নয়।\n\n"
-            "💡 **সমাধান:**\n"
-            "1. বাম পাশের সাইডবার থেকে অপ্রয়োজনীয় টার্গেটগুলো (যেমন: Tier #2, Tier #3, Tier #4) ডান পাশের `❌` বাটনে ক্লিক করে ডিলিট করে দিন।\n"
-            "2. শুধু **১টি মূল টার্গেট** রাখুন: `Exact Match (k) = 5`, `Min Count (>=) = 1` অথবা `Exact Match (k) = 4`, `Min Count (>=) = 1`।\n"
-            "3. অথবা উপরের ড্রপডাউন থেকে **Preset Scenario** সিলেক্ট করে আবার রান দিন!"
-        )
+        """).strip()
+        st.markdown(infeasible_alert_html, unsafe_allow_html=True)
 
     # 2. Key Metrics Grid
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
@@ -572,7 +564,7 @@ if opt_res is not None:
                 <div class="or-metric-val">{opt_res.total_tickets:,}</div>
                 <div class="or-metric-label">Winning Wheel Tickets</div>
             </div>
-            """),
+            """).strip(),
             unsafe_allow_html=True
         )
     with m_col2:
@@ -582,7 +574,7 @@ if opt_res is not None:
                 <div class="or-metric-val">{opt_res.total_draws_in_universe:,}</div>
                 <div class="or-metric-label">Exhaustive Draws Audited</div>
             </div>
-            """),
+            """).strip(),
             unsafe_allow_html=True
         )
     with m_col3:
@@ -592,7 +584,7 @@ if opt_res is not None:
                 <div class="or-metric-val">{opt_res.total_iterations} <span style="font-size:1rem; color:#94a3b8;">({opt_res.active_draws_count} cuts)</span></div>
                 <div class="or-metric-label">Cutting Iterations</div>
             </div>
-            """),
+            """).strip(),
             unsafe_allow_html=True
         )
     with m_col4:
@@ -602,7 +594,7 @@ if opt_res is not None:
                 <div class="or-metric-val">{opt_res.total_time_seconds:.2f}s</div>
                 <div class="or-metric-label">Total Execution Time</div>
             </div>
-            """),
+            """).strip(),
             unsafe_allow_html=True
         )
 
@@ -648,10 +640,10 @@ if opt_res is not None:
             st.dataframe(df_levels, use_container_width=True, hide_index=True)
 
     # 5. Worst-Case Result Inspector
-    st.markdown("### 🔍 Worst-Case Result Inspector")
-    st.caption("Inspect the exact draw where the minimum hit count occurred.")
-
     if opt_res.verification_summary and opt_res.verification_summary.tier_summaries:
+        st.markdown("### 🔍 Worst-Case Result Inspector")
+        st.caption("Inspect the exact draw where the minimum hit count occurred.")
+
         inspect_tiers = list(opt_res.verification_summary.tier_summaries.keys())
         selected_inspect_tier = st.selectbox(
             "Select Target Tier to Inspect Worst-Case Draw:",
@@ -664,20 +656,18 @@ if opt_res is not None:
         worst_draw_set = set(worst_draw)
 
         balls_markup = "".join([f"<span class='draw-ball'>{num:02d}</span>" for num in worst_draw])
-        st.markdown(
-            textwrap.dedent(f"""
-            <div style="background:#111827; border:1px solid #1e3a8a; border-radius:10px; padding:12px 16px; margin-bottom:12px;">
-                <div style="color:#93c5fd; font-size:0.78rem; font-weight:800; text-transform:uppercase;">
-                    Worst-Case Draw for Exact {target_summ.target_k}-Match:
-                </div>
-                <div style="margin-top:6px;">{balls_markup}</div>
-                <div style="color:#cbd5e1; font-size:0.8rem; margin-top:6px; font-family:ui-monospace, monospace;">
-                    Minimum tickets matching exactly {target_summ.target_k}: <strong>{target_summ.worst_case_min}</strong> (Required: ≥ {target_summ.min_count})
-                </div>
+        worst_draw_html = textwrap.dedent(f"""
+        <div style="background:#111827; border:1px solid #1e3a8a; border-radius:10px; padding:12px 16px; margin-bottom:12px;">
+            <div style="color:#93c5fd; font-size:0.78rem; font-weight:800; text-transform:uppercase;">
+                Worst-Case Draw for Exact {target_summ.target_k}-Match:
             </div>
-            """),
-            unsafe_allow_html=True
-        )
+            <div style="margin-top:6px;">{balls_markup}</div>
+            <div style="color:#cbd5e1; font-size:0.8rem; margin-top:6px; font-family:ui-monospace, monospace;">
+                Minimum tickets matching exactly {target_summ.target_k}: <strong>{target_summ.worst_case_min}</strong> (Required: ≥ {target_summ.min_count})
+            </div>
+        </div>
+        """).strip()
+        st.markdown(worst_draw_html, unsafe_allow_html=True)
 
         ticket_match_details = []
         for rank, ticket in enumerate(opt_res.tickets, start=1):
@@ -719,11 +709,11 @@ if opt_res is not None:
                 style_prefix = "⭐ " if is_target else "• "
                 st.markdown(f"{style_prefix}Exact **{m_level}** matches: **{counts_on_worst[m_level]}** tickets")
 
-    # 6. One-Click CSV & Excel XLSX Export (Gap 6)
-    st.markdown("---")
-    st.markdown("### 📥 Download Tickets (CSV & Excel XLSX)")
-
+    # 6. One-Click CSV & Excel XLSX Export
     if opt_res.tickets:
+        st.markdown("---")
+        st.markdown("### 📥 Download Tickets (CSV & Excel XLSX)")
+
         export_rows = []
         for rank, ticket in enumerate(opt_res.tickets, start=1):
             row_dict = {
@@ -738,10 +728,8 @@ if opt_res is not None:
 
         df_export = pd.DataFrame(export_rows)
 
-        # CSV bytes
         csv_bytes = df_export.to_csv(index=False).encode("utf-8")
 
-        # Excel XLSX bytes
         xlsx_buffer = io.BytesIO()
         with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
             df_export.to_excel(writer, index=False, sheet_name="Optimal_Tickets")
@@ -778,11 +766,8 @@ if opt_res is not None:
                     "Active Draws": h.num_active_draws,
                     "Candidate Pool": h.num_candidate_tickets,
                     "Tickets Solved": h.num_tickets_found,
-                    "Violations Found": h.num_violations,
-                    "Solver Status": h.solver_status,
-                    "Solve Time": f"{h.solve_time_seconds:.2f}s",
-                    "Verify Time": f"{h.verification_time_seconds:.2f}s"
+                    "Violations Added": h.num_violations_added,
+                    "Time (s)": f"{h.iteration_time_seconds:.2f}",
+                    "Status": h.status
                 })
             st.dataframe(pd.DataFrame(hist_data), use_container_width=True, hide_index=True)
-else:
-    st.info("👈 Configure universal parameters and compound targets in the sidebar, then click **'Run Delayed Constraint Optimizer'**.")
