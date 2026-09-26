@@ -1,16 +1,17 @@
 """
-optimizer.py - Production Combinatorial Optimizer & Cutting-Plane Engine
+optimizer.py - Production Combinatorial Optimizer & Chvátal Greedy Set Cover Engine
 Iteratively generates minimal tickets ensuring 100% worst-case guarantee (FAIL = 0).
 """
 
 from __future__ import annotations
 import math
 import time
+import os
+import json
 import itertools
 from typing import List, Tuple, Set, Dict, Optional, Callable
 from core import GameConfig, OptimizationResult, VerificationResult, ticket_to_mask, mask_to_ticket
-from verifier import verify_coverage
-from solver_cp_sat import CPSatCoveringSolver
+from verifier import verify_coverage, verify_all_results
 
 def generate_cyclic_seed_tickets(v: int = 27, k: int = 6, offset: int = 1) -> List[List[int]]:
     """
@@ -49,6 +50,124 @@ def generate_cyclic_seed_tickets(v: int = 27, k: int = 6, offset: int = 1) -> Li
 
     return seed_tickets
 
+def run_chvatal_greedy_repair(
+    seed_tickets: List[List[int]],
+    config: Optional[GameConfig] = None,
+    progress_callback: Optional[Callable[[int, int, int], None]] = None,
+) -> List[List[int]]:
+    """
+    Chvátal's Greedy Set Cover loop starting from the current seeds:
+    1. Identifies the exact uncovered draws as a bitmask set.
+    2. Iteratively evaluates candidate tickets that cover the maximum remaining uncovered draws.
+    3. Greedily appends the best tickets to the wheel until the uncovered set is STRICTLY EMPTY (len(uncovered) == 0).
+    4. Prunes redundant tickets that do not violate coverage.
+    """
+    if config is None:
+        config = GameConfig(universe_size=27, ticket_size=6, draw_size=6, target_k=5, min_count=1)
+
+    v = config.universe_size
+    k = config.ticket_size
+    offset = config.start_number
+    target_k = config.target_k
+
+    # Generate all draws
+    draws = list(itertools.combinations(range(offset, offset + v), config.draw_size))
+    draw_index = {d: i for i, d in enumerate(draws)}
+    N = len(draws)
+
+    tickets = [list(t) for t in seed_tickets]
+
+    # Pre-index 5-subsets of initial seeds
+    covered = bytearray(N)
+    covered_5 = set()
+    for t in tickets:
+        for s5 in itertools.combinations(sorted(t), 5):
+            covered_5.add(s5)
+
+    covered_count = 0
+    uncovered_indices = []
+    for i, d in enumerate(draws):
+        if any(s5 in covered_5 for s5 in itertools.combinations(d, 5)):
+            covered[i] = 1
+            covered_count += 1
+        else:
+            uncovered_indices.append(i)
+
+    def get_covered_draws(cand: Iterable[int]) -> List[int]:
+        cand_list = list(cand)
+        cand_set = set(cand_list)
+        cand_others = [x for x in range(offset, offset + v) if x not in cand_set]
+        res = [draw_index[tuple(sorted(cand_list))]]
+        for i in range(k):
+            base = cand_list[:i] + cand_list[i+1:]
+            for o in cand_others:
+                res.append(draw_index[tuple(sorted(base + [o]))])
+        return res
+
+    # Chvatal Greedy Loop
+    step = 0
+    while uncovered_indices:
+        while uncovered_indices and covered[uncovered_indices[-1]]:
+            uncovered_indices.pop()
+        if not uncovered_indices:
+            break
+
+        target_idx = uncovered_indices[-1]
+        target_draw = draws[target_idx]
+
+        target_set = set(target_draw)
+        others = [x for x in range(offset, offset + v) if x not in target_set]
+
+        # Candidates: target_draw itself + 1-element variations
+        candidates = [target_draw]
+        for i in range(k):
+            base = list(target_draw[:i] + target_draw[i+1:])
+            for o in others[:6]:
+                candidates.append(tuple(sorted(base + [o])))
+
+        best_cand = target_draw
+        best_gain = 0
+        best_cov_draws: List[int] = []
+
+        for cand in candidates:
+            cov_draws = get_covered_draws(cand)
+            gain = sum(1 for d_idx in cov_draws if not covered[d_idx])
+            if gain > best_gain:
+                best_gain = gain
+                best_cand = cand
+                best_cov_draws = cov_draws
+
+        tickets.append(list(best_cand))
+        for d_idx in best_cov_draws:
+            if not covered[d_idx]:
+                covered[d_idx] = 1
+                covered_count += 1
+
+        step += 1
+        if progress_callback and step % 500 == 0:
+            progress_callback(step, len(tickets), N - covered_count)
+
+    # Step 4: Redundancy Pruning Pass
+    coverage_counts = [0] * N
+    ticket_to_draws = []
+    for t in tickets:
+        cov = get_covered_draws(t)
+        ticket_to_draws.append(cov)
+        for d_idx in cov:
+            coverage_counts[d_idx] += 1
+
+    pruned_tickets: List[List[int]] = []
+    for t_idx, t in enumerate(tickets):
+        cov = ticket_to_draws[t_idx]
+        can_prune = all(coverage_counts[d_idx] > 1 for d_idx in cov)
+        if can_prune:
+            for d_idx in cov:
+                coverage_counts[d_idx] -= 1
+        else:
+            pruned_tickets.append(t)
+
+    return sorted(pruned_tickets, key=lambda t: (t[0], t[1], t[2], t[3], t[4], t[5]))
+
 def optimize_wheel(
     config: Optional[GameConfig] = None,
     target_k: int = 5,
@@ -58,14 +177,7 @@ def optimize_wheel(
     progress_callback: Optional[Callable[[int, int, int], None]] = None,
 ) -> OptimizationResult:
     """
-    Iterative Delayed Constraint Generation (Cutting-Plane) Optimizer.
-
-    Strict Client Requirements:
-    1. Does NOT abort prematurely with uncovered draws.
-    2. Iteratively resolves all violating draws until:
-       Total Results = 296,010
-       FAIL Results  = 0
-    3. Objective: Minimal ticket count (Priority 1: 100% guarantee, Priority 2: minimal tickets).
+    Main entry point: Generates minimal tickets ensuring 100% guarantee (FAIL = 0).
     """
     if config is None:
         config = GameConfig(universe_size=27, ticket_size=6, draw_size=6, target_k=target_k, min_count=min_count)
@@ -75,127 +187,42 @@ def optimize_wheel(
 
     v = config.universe_size
     k = config.ticket_size
-    m = config.draw_size
-    offset = config.start_number
-    t_start = time.perf_counter()
 
-    # Step 1: Initial Seed / Preloaded Optimal Covering Design
-    tickets: List[List[int]] = []
-    # If 6/27 with target 5, load verified zero-fail minimal tickets if available
-    import os, json
-    zero_fail_file = "tickets_guaranteed_5.json"
+    # Load verified zero-gap tickets if available on disk
+    zero_fail_file = "tickets_chvatal_minimal.json"
     if v == 27 and k == 6 and target_k == 5 and os.path.exists(zero_fail_file):
         try:
             with open(zero_fail_file) as f:
                 tickets = json.load(f)
         except Exception:
             tickets = []
+    else:
+        tickets = []
 
     if not tickets:
-        if v == 27 and k == 6:
-            tickets = generate_cyclic_seed_tickets(v=27, k=6, offset=offset)
+        # Load seeds from 2335 or generate cyclic seeds
+        seeds_file = "tickets_2335.json"
+        if os.path.exists(seeds_file):
+            with open(seeds_file) as f:
+                seeds = json.load(f)
         else:
-            pool = list(range(offset, offset + v))
-            for _ in range(max(10, config.schonheim_lower_bound // 4)):
-                tickets.append(sorted(pool[:k]))
+            seeds = generate_cyclic_seed_tickets(v=v, k=k)
 
-    seen_tickets = {tuple(sorted(t)) for t in tickets}
+        tickets = run_chvatal_greedy_repair(seeds, config=config, progress_callback=progress_callback)
+        try:
+            with open(zero_fail_file, "w") as f:
+                json.dump(tickets, f)
+        except Exception:
+            pass
 
-    # Step 2: Cutting-Plane / Constraint Generation Loop
-    iteration = 0
-    solver = CPSatCoveringSolver(config=config, time_limit_seconds=30.0)
-
-    while iteration < max_iterations:
-        iteration += 1
-
-        # Exhaustive verification against ALL 296,010 draws
-        audit = verify_coverage(tickets, config=config, target_k=target_k, min_count=min_count)
-
-        if progress_callback:
-            progress_callback(iteration, len(tickets), audit.fail_count)
-
-        # Check stopping criterion: 100% ZERO-MISS GUARANTEE
-        if audit.fail_count == 0:
-            break
-
-        # Extract violating draws that have zero coverage
-        violating = audit.uncovered_draws_sample
-        if not violating:
-            break
-
-        # Generate candidates to cover the violating draws
-        candidate_pool: List[List[int]] = []
-        cand_seen = set()
-
-        for draw in violating[:500]:
-            draw_list = list(draw)
-            # Add draw itself as candidate
-            d_key = tuple(sorted(draw_list))
-            if d_key not in seen_tickets and d_key not in cand_seen:
-                cand_seen.add(d_key)
-                candidate_pool.append(draw_list)
-
-            # Add 1-element variations that share 5 elements with draw
-            draw_set = set(draw_list)
-            others = [x for x in range(offset, offset + v) if x not in draw_set]
-            for i in range(k):
-                base = draw_list[:i] + draw_list[i+1:]
-                for o in others[:4]:  # Take best neighboring candidates
-                    cand = sorted(base + [o])
-                    c_key = tuple(cand)
-                    if c_key not in seen_tickets and c_key not in cand_seen:
-                        cand_seen.add(c_key)
-                        candidate_pool.append(cand)
-
-        # Solve cutting-plane subproblem to pick minimal new tickets covering violations
-        new_tickets, _ = solver.solve_cutting_plane_subproblem(
-            candidate_tickets=candidate_pool,
-            violating_draws=violating,
-            existing_tickets=None,
-        )
-
-        added = 0
-        for t in new_tickets:
-            st = tuple(sorted(t))
-            if st not in seen_tickets:
-                seen_tickets.add(st)
-                tickets.append(t)
-                added += 1
-
-        # Fallback safeguard: if solver selected 0, directly add violating draws to guarantee progress
-        if added == 0:
-            for draw in violating[:50]:
-                st = tuple(sorted(draw))
-                if st not in seen_tickets:
-                    seen_tickets.add(st)
-                    tickets.append(list(draw))
-                    added += 1
-
-        if time.perf_counter() - t_start > time_limit_seconds:
-            break
-
-    # Step 3: Minimal Ticket Pruning Pass (Redundancy Elimination)
-    # For small instances, prune redundant tickets without violating any draw
-    if v <= 14 and audit.fail_count == 0 and len(tickets) > config.schonheim_lower_bound:
-        candidates_to_keep = list(tickets)
-        for i in range(len(candidates_to_keep) - 1, -1, -1):
-            trial_set = candidates_to_keep[:i] + candidates_to_keep[i+1:]
-            audit_trial = verify_coverage(trial_set, config=config, target_k=target_k, min_count=min_count, max_violating_draws_to_collect=1)
-            if audit_trial.fail_count == 0:
-                candidates_to_keep = trial_set
-        tickets = candidates_to_keep
-
-    # Final Exhaustive Verification
-    final_audit = verify_coverage(tickets, config=config, target_k=target_k, min_count=min_count)
-
-    # Sort tickets by numbers for clean presentation
-    sorted_tickets = sorted(tickets, key=lambda t: (t[0], t[1], t[2], t[3], t[4], t[5]))
+    # Exhaustive verification of all 296,010 draws
+    final_audit = verify_all_results(tickets, config=config, target_k=target_k, min_count=min_count)
 
     return OptimizationResult(
-        tickets=sorted_tickets,
-        ticket_count=len(sorted_tickets),
+        tickets=tickets,
+        ticket_count=len(tickets),
         config=config,
         verification=final_audit,
-        iterations=iteration,
+        iterations=1,
         solver_status=final_audit.solver_status,
     )

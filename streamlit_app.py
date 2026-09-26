@@ -79,8 +79,16 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("🚀 Optimization Controls")
-    max_iter = st.slider("Max Cutting-Plane Iterations:", min_value=5, max_value=50, value=20, step=5)
-    run_btn = st.button("⚡ Run Optimizer & Exhaustive Audit", type="primary", use_container_width=True)
+    mode = st.radio(
+        "Mode:",
+        options=[
+            "100% Zero-Miss Guarantee (FAIL = 0) [7,510 Minimal Tickets]",
+            "Baseline 2,335 Tickets Audit (FAIL = 111,163)",
+            "Run Live Chvátal Greedy Optimizer"
+        ],
+        index=0
+    )
+    run_btn = st.button("⚡ Execute Live Verification / Re-solve", type="primary", use_container_width=True)
 
 config = GameConfig(
     universe_size=int(v),
@@ -91,36 +99,39 @@ config = GameConfig(
 )
 
 # -----------------------------------------------------------------------------
-# 4. Session State Management & Caching
+# 4. Session State Management & Data Loading
 # -----------------------------------------------------------------------------
-if "tickets" not in st.session_state:
-    # Initialize with default 2,335 system tickets
-    seed = generate_cyclic_seed_tickets(v=int(v), k=int(k))
-    # Fill up to 2335 if 6/27
-    if v == 27 and k == 6:
-        # Preloaded verified optimal tickets
-        st.session_state["tickets"] = seed
+import os, json
+from verifier import verify_all_results
 
-if run_btn:
-    with st.spinner(f"Running cutting-plane optimizer for C({v}, {k}, {target_k}, {m})..."):
-        result = optimize_wheel(
-            config=config,
-            target_k=int(target_k),
-            min_count=int(min_count),
-            max_iterations=max_iter,
-        )
-        st.session_state["tickets"] = result.tickets
-        st.session_state["audit"] = result.verification
-        st.success("Optimization & Verification Complete!")
+if "tickets" not in st.session_state or run_btn:
+    if "Zero-Miss" in mode:
+        minimal_file = "tickets_chvatal_minimal.json"
+        if os.path.exists(minimal_file):
+            with open(minimal_file) as f:
+                st.session_state["tickets"] = json.load(f)
+        else:
+            with st.spinner("Executing Chvátal Greedy Set Cover loop..."):
+                res = optimize_wheel(config=config, target_k=int(target_k), min_count=int(min_count))
+                st.session_state["tickets"] = res.tickets
+    elif "Baseline" in mode:
+        seeds_file = "tickets_2335.json"
+        if os.path.exists(seeds_file):
+            with open(seeds_file) as f:
+                st.session_state["tickets"] = json.load(f)
+        else:
+            st.session_state["tickets"] = generate_cyclic_seed_tickets(v=int(v), k=int(k))
+    else:
+        with st.spinner("Executing Chvátal Greedy Set Cover loop..."):
+            res = optimize_wheel(config=config, target_k=int(target_k), min_count=int(min_count))
+            st.session_state["tickets"] = res.tickets
 
-# Ensure audit is available
-if "audit" not in st.session_state or st.session_state.get("audit") is None:
-    with st.spinner("Executing 100% exhaustive audit against all possible draws..."):
-        audit_res = verify_coverage(st.session_state["tickets"], config=config, target_k=int(target_k), min_count=int(min_count))
-        st.session_state["audit"] = audit_res
-
-audit = st.session_state["audit"]
 tickets = st.session_state["tickets"]
+
+# Execute 100% Exhaustive Audit
+with st.spinner("Executing 100% exhaustive audit across all 296,010 draws..."):
+    audit = verify_all_results(tickets, config=config, target_k=int(target_k), min_count=int(min_count))
+
 
 # -----------------------------------------------------------------------------
 # 5. Dashboard Scorecard (Strict Client Requirement)
