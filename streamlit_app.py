@@ -18,6 +18,7 @@ from enum import Enum
 from itertools import combinations
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 from ortools.sat.python import cp_model
@@ -252,17 +253,26 @@ def estimate_universe_complexity(
 # 3. 100% EXHAUSTIVE COMBINATORIAL VERIFIER (Zero Sampling)
 # =============================================================================
 
+# Precomputed 16-bit popcount lookup table for vectorised bitwise audit
+_POPCNT_LUT_16 = np.array([bin(x).count('1') for x in range(65536)], dtype=np.uint8)
+
+
 def verify_tickets_exhaustive(
     tickets: List[Tuple[int, ...]],
     universe_min: int,
     universe_max: int,
     draw_size: int,
     targets: List[TargetTier],
-    max_violations_to_collect: int = 5000
+    max_violations_to_collect: int = 5000,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    step_info: Optional[Dict[str, Any]] = None,
+    chunk_size: int = 20000,
 ) -> VerificationResult:
     """
     Exhaustively audits the ticket set against 100% of all possible combinations in C(Universe, m).
     STRICT: Evaluates EVERY single draw. Zero probabilistic sampling.
+    Uses ultra-fast NumPy chunked bitwise evaluation (np.bitwise_and in chunks of 20,000)
+    with smooth real-time progress updates and metrics reporting.
     """
     universe = list(range(universe_min, universe_max + 1))
     v = len(universe)
@@ -297,10 +307,34 @@ def verify_tickets_exhaustive(
     min_val = universe_min
     ticket_k = len(tickets[0])
     max_match_level = min(ticket_k, draw_size)
-
-    # Vectorized hardware bitmask conversion
-    ticket_masks = [numbers_to_mask(t, min_val) for t in tickets]
     num_tickets = len(tickets)
+
+    # Use uint32 for universes <= 32 numbers, uint64 for up to 64
+    mask_dtype = np.uint64 if v > 32 else np.uint32
+    ticket_masks = np.array([numbers_to_mask(t, min_val) for t in tickets], dtype=mask_dtype)
+
+    # Popcount vectorizer using precomputed 16-bit LUT
+    lut = _POPCNT_LUT_16
+    if mask_dtype == np.uint32:
+        def popcount_arr(arr: np.ndarray) -> np.ndarray:
+            res = lut[arr & 0xFFFF].copy()
+            res += lut[(arr >> 16) & 0xFFFF]
+            return res
+    else:
+        def popcount_arr(arr: np.ndarray) -> np.ndarray:
+            res = lut[arr & 0xFFFF].copy()
+            res += lut[(arr >> 16) & 0xFFFF]
+            res += lut[(arr >> 32) & 0xFFFF]
+            res += lut[(arr >> 48) & 0xFFFF]
+            return res
+
+    all_draws = list(combinations(universe, draw_size))
+    draw_masks = np.zeros(total_draws, dtype=mask_dtype)
+    for idx, d in enumerate(all_draws):
+        mv = 0
+        for x in d:
+            mv |= (1 << (x - min_val))
+        draw_masks[idx] = mv
 
     all_levels = list(range(max_match_level + 1))
     lvl_min = {lvl: num_tickets + 1 for lvl in all_levels}
@@ -314,43 +348,109 @@ def verify_tickets_exhaustive(
     target_dict = {t.target_k: t.min_count for t in targets}
     tier_dist_counts = {k: {} for k in unique_target_ks}
     violations: List[Tuple[int, ...]] = []
+    uncovered_draws_count = 0
 
-    # 100% Exhaustive loop over C(v, m) combinations
-    for draw in combinations(universe, draw_size):
-        d_mask = numbers_to_mask(draw, min_val)
-        counts_for_draw = [0] * (max_match_level + 1)
+    step_num = step_info.get("step", 2) if step_info else 2
+    max_step_num = step_info.get("max_steps", 4) if step_info else 4
+    phase_name = step_info.get("phase", "EXHAUSTIVE_AUDIT") if step_info else "EXHAUSTIVE_AUDIT"
 
-        for t_mask in ticket_masks:
-            overlap = (t_mask & d_mask).bit_count()
-            if overlap <= max_match_level:
-                counts_for_draw[overlap] += 1
+    # Initial 0% progress notification
+    if progress_callback:
+        progress_callback({
+            "iteration": step_num,
+            "max_iterations": max_step_num,
+            "phase": phase_name,
+            "status": f"Auditing Progress: 0% (0 / {total_draws:,} draws evaluated)",
+            "active_draws": total_draws,
+            "draws_evaluated": 0,
+            "total_draws": total_draws,
+            "uncovered_count": 0,
+            "speed": 0,
+            "speed_str": "0 draws/sec",
+            "progress_float": min(1.0, (step_num - 1) / max_step_num),
+            "candidates_count": num_tickets,
+            "tickets_count": num_tickets,
+        })
 
-        draw_has_violation = False
+    audit_start_time = time.time()
+    t_masks_row = ticket_masks[None, :]  # shape: (1, num_tickets)
+    effective_chunk = max(1000, chunk_size)
+
+    # 100% Vectorized Bitwise Audit in Fast 20,000 Chunks
+    for chunk_start in range(0, total_draws, effective_chunk):
+        chunk_end = min(chunk_start + effective_chunk, total_draws)
+        chunk_len = chunk_end - chunk_start
+
+        chunk_d = draw_masks[chunk_start:chunk_end, None]
+        and_res = chunk_d & t_masks_row
+        overlap = popcount_arr(and_res)  # shape: (chunk_len, num_tickets), dtype uint8
+
+        chunk_has_violation = np.zeros(chunk_len, dtype=bool)
 
         for lvl in all_levels:
-            c = counts_for_draw[lvl]
-            lvl_sum[lvl] += c
-            lvl_sum_sq[lvl] += c * c
+            lvl_counts = np.count_nonzero(overlap == lvl, axis=1)
+            lvl_sum[lvl] += int(np.sum(lvl_counts))
+            lvl_sum_sq[lvl] += int(np.sum(lvl_counts.astype(np.int64) ** 2))
 
-            if c < lvl_min[lvl]:
-                lvl_min[lvl] = c
-                lvl_worst_draw[lvl] = draw
-            if c > lvl_max[lvl]:
-                lvl_max[lvl] = c
-                lvl_best_draw[lvl] = draw
+            c_min = int(np.min(lvl_counts))
+            if c_min < lvl_min[lvl]:
+                lvl_min[lvl] = c_min
+                arg_min = int(np.argmin(lvl_counts))
+                lvl_worst_draw[lvl] = all_draws[chunk_start + arg_min]
+
+            c_max = int(np.max(lvl_counts))
+            if c_max > lvl_max[lvl]:
+                lvl_max[lvl] = c_max
+                arg_max = int(np.argmax(lvl_counts))
+                lvl_best_draw[lvl] = all_draws[chunk_start + arg_max]
+
+            if lvl in target_dict:
+                req_min = target_dict[lvl]
+                chunk_has_violation |= (lvl_counts < req_min)
+                bcounts = np.bincount(lvl_counts)
+                for val, cnt in enumerate(bcounts):
+                    if cnt > 0:
+                        tier_dist_counts[lvl][val] = tier_dist_counts[lvl].get(val, 0) + int(cnt)
 
         for k in unique_target_ks:
-            cnt = counts_for_draw[k] if k <= max_match_level else 0
-            if cnt in tier_dist_counts[k]:
-                tier_dist_counts[k][cnt] += 1
-            elif len(tier_dist_counts[k]) < 50:
-                tier_dist_counts[k][cnt] = 1
+            if k > max_match_level:
+                chunk_has_violation[:] = True
+                tier_dist_counts[k][0] = tier_dist_counts[k].get(0, 0) + chunk_len
 
-            if cnt < target_dict[k]:
-                draw_has_violation = True
+        num_viol_in_chunk = int(np.count_nonzero(chunk_has_violation))
+        uncovered_draws_count += num_viol_in_chunk
 
-        if draw_has_violation and len(violations) < max_violations_to_collect:
-            violations.append(draw)
+        if num_viol_in_chunk > 0 and len(violations) < max_violations_to_collect:
+            viol_indices = np.where(chunk_has_violation)[0]
+            for idx in viol_indices:
+                violations.append(all_draws[chunk_start + idx])
+                if len(violations) >= max_violations_to_collect:
+                    break
+
+        if progress_callback:
+            evaluated_draws = chunk_end
+            pct = evaluated_draws / total_draws
+            pct_int = int(round(pct * 100))
+            elapsed = time.time() - audit_start_time
+            speed = int(evaluated_draws / elapsed) if elapsed > 0.05 else 0
+
+            step_progress_float = min(1.0, ((step_num - 1) + pct) / max_step_num)
+
+            progress_callback({
+                "iteration": step_num,
+                "max_iterations": max_step_num,
+                "phase": phase_name,
+                "status": f"Auditing Progress: {pct_int}% ({evaluated_draws:,} / {total_draws:,} draws evaluated)",
+                "active_draws": total_draws,
+                "draws_evaluated": evaluated_draws,
+                "total_draws": total_draws,
+                "uncovered_count": uncovered_draws_count,
+                "speed": speed,
+                "speed_str": f"{speed:,} draws/sec",
+                "progress_float": step_progress_float,
+                "candidates_count": num_tickets,
+                "tickets_count": num_tickets,
+            })
 
     all_levels_stats = {}
     for lvl in all_levels:
@@ -694,6 +794,7 @@ def generate_complete_guaranteed_cover(
             "active_draws": total_draws_all,
             "candidates_count": total_candidates_all,
             "tickets_count": len(raw_tickets),
+            "progress_float": 0.25,
         })
 
     # Phase 3: Set Cover Audit & Deficit Draw Repair
@@ -703,27 +804,45 @@ def generate_complete_guaranteed_cover(
         universe_max=universe_max,
         draw_size=m,
         targets=targets,
-        max_violations_to_collect=5000
+        max_violations_to_collect=5000,
+        progress_callback=progress_callback,
+        step_info={"step": 2, "max_steps": 4, "phase": "GREEDY_SET_COVER"},
+        chunk_size=20000,
     )
 
     repair_step = 0
-    while not verif.is_valid and verif.violations and repair_step < 20:
+    while not verif.is_valid and verif.violations and repair_step < 5:
         repair_step += 1
+        if progress_callback:
+            progress_callback({
+                "iteration": 2,
+                "max_iterations": 4,
+                "phase": "REPAIR_DEFICITS",
+                "status": f"Repairing {len(verif.violations):,} deficit draws (Pass {repair_step})...",
+                "active_draws": total_draws_all,
+                "candidates_count": total_candidates_all,
+                "tickets_count": len(raw_tickets),
+                "uncovered_count": len(verif.violations),
+                "progress_float": 0.50,
+            })
         new_repair_tickets = []
-        for viol in verif.violations[:100]:
+        for viol in verif.violations[:1000]:
             v_set = set(viol)
             outside = [x for x in universe if x not in v_set]
             if not outside:
                 outside = list(universe)
+            outside.sort(key=lambda x: freq[x - universe_min + 1])
             for t_req in targets:
                 tk = min(t_req.target_k, len(viol))
                 fill_needed = k - tk
-                if fill_needed >= 0 and fill_needed <= len(outside):
+                if 0 <= fill_needed <= len(outside):
                     cand = tuple(sorted(viol[:tk] + tuple(outside[:fill_needed])))
                     if cand not in seen_tickets and len(set(cand)) == k:
                         seen_tickets.add(cand)
                         new_repair_tickets.append(cand)
                         raw_tickets.append(cand)
+                        for n in cand:
+                            freq[n - universe_min + 1] += 1
         if not new_repair_tickets:
             break
         verif = verify_tickets_exhaustive(
@@ -732,7 +851,10 @@ def generate_complete_guaranteed_cover(
             universe_max=universe_max,
             draw_size=m,
             targets=targets,
-            max_violations_to_collect=5000
+            max_violations_to_collect=5000,
+            progress_callback=progress_callback,
+            step_info={"step": 2, "max_steps": 4, "phase": "REPAIR_DEFICITS"},
+            chunk_size=20000,
         )
 
     # Phase 4: Redundancy Pruning down to target_wheel_size (if safe)
@@ -741,10 +863,11 @@ def generate_complete_guaranteed_cover(
             "iteration": 3,
             "max_iterations": 4,
             "phase": "REDUNDANCY_PRUNING",
-            "status": f"Pruning redundant tickets while strictly preserving 100% guarantee...",
+            "status": "Pruning redundant tickets while strictly preserving 100% guarantee...",
             "active_draws": total_draws_all,
             "candidates_count": total_candidates_all,
             "tickets_count": len(raw_tickets),
+            "progress_float": 0.75,
         })
 
     if len(raw_tickets) > target_wheel_size:
@@ -757,31 +880,40 @@ def generate_complete_guaranteed_cover(
             universe_max=universe_max,
             draw_size=m,
             targets=targets,
-            max_violations_to_collect=10
+            max_violations_to_collect=10,
+            progress_callback=progress_callback,
+            step_info={"step": 3, "max_steps": 4, "phase": "REDUNDANCY_PRUNING"},
+            chunk_size=20000,
         )
         if test_verif.is_valid:
             raw_tickets = cand_pruned
             verif = test_verif
 
     # Phase 5: Final Comprehensive Exhaustive Audit
-    if progress_callback:
-        progress_callback({
-            "iteration": 4,
-            "max_iterations": 4,
-            "phase": "FINAL_AUDIT",
-            "status": f"Final 100% Combinatorial Audit across all {total_draws_all:,} draws...",
-            "active_draws": total_draws_all,
-            "candidates_count": total_candidates_all,
-            "tickets_count": len(raw_tickets),
-        })
-
-    final_verif = verify_tickets_exhaustive(
-        tickets=raw_tickets,
-        universe_min=universe_min,
-        universe_max=universe_max,
-        draw_size=m,
-        targets=targets
-    )
+    if not verif.is_valid:
+        if progress_callback:
+            progress_callback({
+                "iteration": 4,
+                "max_iterations": 4,
+                "phase": "FINAL_AUDIT",
+                "status": f"Final 100% Combinatorial Audit across all {total_draws_all:,} draws...",
+                "active_draws": total_draws_all,
+                "candidates_count": total_candidates_all,
+                "tickets_count": len(raw_tickets),
+                "progress_float": 0.85,
+            })
+        final_verif = verify_tickets_exhaustive(
+            tickets=raw_tickets,
+            universe_min=universe_min,
+            universe_max=universe_max,
+            draw_size=m,
+            targets=targets,
+            progress_callback=progress_callback,
+            step_info={"step": 4, "max_steps": 4, "phase": "FINAL_AUDIT"},
+            chunk_size=20000,
+        )
+    else:
+        final_verif = verif
 
     # Priority Ranking of Tickets (Maximum Spread Ordering)
     dynamic_freq = [0] * (v + 1)
@@ -1088,7 +1220,10 @@ def run_delayed_constraint_generation(
             universe_max=universe_max,
             draw_size=m,
             targets=targets,
-            max_violations_to_collect=cuts_per_iteration * 15
+            max_violations_to_collect=cuts_per_iteration * 15,
+            progress_callback=progress_callback,
+            step_info={"step": iteration, "max_steps": max_iterations, "phase": "EXHAUSTIVE_AUDIT"},
+            chunk_size=20000,
         )
         verif_time = time.time() - t_verif_start
         num_violations = len(verif.violations)
@@ -1517,7 +1652,9 @@ def run_web_dashboard():
         def update_progress(info: Dict[str, Any]):
             it = info.get("iteration", 1)
             max_it = info.get("max_iterations", max_iters)
-            pct = min(1.0, it / max_it)
+
+            pct = info.get("progress_float", min(1.0, it / max(1, max_it)))
+            pct = max(0.0, min(1.0, float(pct)))
             progress_bar.progress(pct)
 
             status_text = info.get("status", "Optimizing...")
@@ -1526,13 +1663,51 @@ def run_web_dashboard():
             t_cnt = info.get("tickets_count", 0)
             c_cnt = info.get("candidates_count", 0)
 
-            p_html = textwrap.dedent(f"""
-            <div style="background:#111827; border:1px solid #374151; border-radius:8px; padding:10px 14px; margin: 8px 0; font-family:ui-monospace, monospace;">
-                <div style="color:#38bdf8; font-weight:800; font-size:0.85rem;">🔄 Phase: {phase} · Step {it}/{max_it}</div>
-                <div style="color:#f3f4f6; font-size:0.8rem; margin-top:2px;">{status_text}</div>
-                <div style="color:#9ca3af; font-size:0.75rem; margin-top:4px;">
-                    Active Constraints: <strong>{active_cnt:,}</strong> | Active Candidates: <strong>{c_cnt:,}</strong> | Current Tickets: <strong>{t_cnt:,}</strong>
+            draws_eval = info.get("draws_evaluated")
+            total_dr = info.get("total_draws", active_cnt)
+            uncovered_cnt = info.get("uncovered_count")
+            speed = info.get("speed")
+            speed_str = info.get("speed_str", f"{speed:,} draws/sec" if speed is not None else "")
+
+            pct_display = int(round(pct * 100))
+
+            metrics_items = []
+            if draws_eval is not None and total_dr:
+                eval_pct = int(round((draws_eval / total_dr) * 100))
+                metrics_items.append(
+                    f"<div>📊 <strong>Auditing Progress:</strong> <span style='color:#38bdf8; font-weight:700;'>{eval_pct}%</span> ({draws_eval:,} / {total_dr:,} draws evaluated)</div>"
+                )
+            if uncovered_cnt is not None:
+                color = "#ef4444" if uncovered_cnt > 0 else "#10b981"
+                metrics_items.append(
+                    f"<div>⚠️ <strong>Uncovered Draws Found:</strong> <span style='color:{color}; font-weight:800;'>{uncovered_cnt:,}</span></div>"
+                )
+            if speed_str:
+                metrics_items.append(
+                    f"<div>⚡ <strong>Current Speed:</strong> <span style='color:#fbbf24; font-weight:700;'>{speed_str}</span></div>"
+                )
+            if t_cnt:
+                metrics_items.append(
+                    f"<div>🎟️ <strong>Current Tickets:</strong> <strong>{t_cnt:,}</strong></div>"
+                )
+
+            metrics_grid = ""
+            if metrics_items:
+                grid_content = "".join(metrics_items)
+                metrics_grid = f"""
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; margin-top:8px; padding-top:8px; border-top:1px solid #1f2937; color:#9ca3af; font-size:0.75rem;">
+                    {grid_content}
                 </div>
+                """
+
+            p_html = textwrap.dedent(f"""
+            <div style="background:#111827; border:1px solid #374151; border-radius:8px; padding:12px 16px; margin: 8px 0; font-family:ui-monospace, monospace;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="color:#38bdf8; font-weight:800; font-size:0.88rem;">🔄 Phase: {phase} · Step {it}/{max_it}</span>
+                    <span style="color:#10b981; font-weight:800; font-size:0.85rem;">Overall {pct_display}%</span>
+                </div>
+                <div style="color:#f3f4f6; font-size:0.82rem; margin-top:4px; font-weight:600;">{status_text}</div>
+                {metrics_grid}
             </div>
             """).strip()
             status_placeholder.markdown(p_html, unsafe_allow_html=True)
