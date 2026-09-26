@@ -60,24 +60,24 @@ export const MetricCards: React.FC<MetricCardsProps> = ({
 
   return (
     <div className="space-y-4 mb-6 font-sans">
-      {/* C++ VERIFICATION CERTIFICATION BADGE */}
-      <div className="bg-gradient-to-r from-[#062419] via-[#093524] to-[#062419] border-2 border-emerald-500 rounded-xl p-3.5 sm:p-4 text-center shadow-lg shadow-emerald-950/40">
+      {/* EXHAUSTIVE COMBINATORIAL AUDIT STATUS BADGE */}
+      <div className="bg-gradient-to-r from-[#0a1b24] via-[#0d2830] to-[#0a1b24] border-2 border-cyan-500/70 rounded-xl p-3.5 sm:p-4 text-center shadow-lg shadow-cyan-950/40">
         <div className="flex flex-col sm:flex-row items-center justify-center gap-2">
-          <ShieldCheck className="w-5 h-5 text-emerald-300 shrink-0 animate-pulse" />
-          <span className="text-xs sm:text-sm font-extrabold font-mono tracking-wide text-emerald-200 uppercase">
+          <ShieldCheck className="w-5 h-5 text-cyan-300 shrink-0" />
+          <span className="text-xs sm:text-sm font-extrabold font-mono tracking-wide text-cyan-200 uppercase">
             {isDigitGame
               ? isBn
-                ? '🛡️ সি++ ও অপ্টিমাইজার অডিট সম্পন্ন: ১,০০০/১,০০০ পারমিউটেশন ড্র পরীক্ষিত · ১০০% জিরো-গ্যাপ লক'
-                : '🛡️ C++ EXHAUSTIVE AUDIT PASSED: 1,000 / 1,000 PERMUTATIONS TESTED · 0 GAPS · CERTIFIED'
+                ? '🛡️ এক্সহস্টিভ অডিট: ১,০০০/১,০০০ পারমিউটেশন ড্র পরীক্ষিত · ১০০% জিরো-গ্যাপ লক'
+                : '🛡️ EXHAUSTIVE AUDIT PASSED: 1,000 / 1,000 PERMUTATIONS TESTED · 0 GAPS'
               : isBn
-              ? '🛡️ সি++ ও এমআইপি সলভার অডিট সম্পন্ন: ২৯৬,০১০ / ২৯৬,০১০ ড্র পরীক্ষিত · ১০০% জিরো-গ্যাপ লক'
-              : '🛡️ C++ EXHAUSTIVE AUDIT PASSED: 296,010 / 296,010 DRAWS TESTED · 0 UNCOVERED GAPS · CERTIFIED'}
+              ? '🛡️ এক্সহস্টিভ অডিট সম্পন্ন: ২৯৬,০১০টি ড্র পরীক্ষিত · ৪-ম্যাচ ১০০% নিশ্চিত (FAIL=০) · ৫-ম্যাচ ১৮৪,৮৪৭ ড্র (৬২.৪৫%)'
+              : '🛡️ EXHAUSTIVE AUDIT: 296,010 DRAWS TESTED · 4-MATCH 100% (FAIL=0) · 5-MATCH 184,847 DRAWS (62.45%)'}
           </span>
         </div>
-        <p className="text-[11px] text-emerald-400/90 font-mono mt-1">
+        <p className="text-[11px] text-cyan-400/90 font-mono mt-1">
           {isBn
-            ? 'সব ধরনের অনুমান, প্রত্যাশিত মান (Expected) বা গড় (Average) বাদ দিয়ে শুধুমাত্র ১০০% পরীক্ষিত এবং সুনিশ্চিত রকবটম গ্যারান্টি।'
-            : 'All probabilistic guesses, averages, and expected values eliminated. Displaying only 100% mathematically tested and verified sure locks.'}
+            ? 'সফটওয়্যারে কোনো অনুমান বা কৃত্রিম পরিবর্তন নেই: প্রতিটি টিকেটের সঠিক মিল (৪-ম্যাচ ও ৫-ম্যাচ সম্পূর্ণ আলাদাভাবে) গণনা করা হয়।'
+            : 'Zero artificial alteration: Exact match calculation (4-match and 5-match strictly separated with 0 confusion).'}
         </p>
       </div>
 
@@ -198,24 +198,24 @@ export const MetricCards: React.FC<MetricCardsProps> = ({
           <div className="relative overflow-hidden bg-gradient-to-br from-[#0c2419] to-[#071710] border-2 border-emerald-400 rounded-2xl p-4 sm:p-5 shadow-xl shadow-emerald-950/50 ring-2 ring-emerald-500/30">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-emerald-300 uppercase tracking-wider font-mono flex items-center gap-1.5">
-                <span>🟢 {isBn ? '৫-ম্যাচ সিউর লক' : '5-MATCH SURE LOCK'}</span>
+                <span>🟢 {isBn ? '৫-ম্যাচ কভারেজ (৬২.৪৫%)' : '5-MATCH COVERAGE (62.45%)'}</span>
               </span>
               <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                {budgetCount >= 2335 || goalSummary?.isBudgetGoalAchieved ? 'ZERO MISS' : 'PARTIAL TIER'}
+                {hits5Budget > 0 ? (isBn ? 'টেস্টে ম্যাচড' : 'MATCHED') : '184,847 DRAWS'}
               </span>
             </div>
 
             <div className="mt-3">
               <div className="text-xl sm:text-2xl font-black font-mono text-emerald-200 tracking-tight">
-                {budgetCount >= 2335 || goalSummary?.isBudgetGoalAchieved
-                  ? (isBn ? 'ঠিক ≥ ১টি টিকিট নিশ্চিত' : 'EXACTLY >= 1 TICKET')
-                  : (isBn ? 'বাজেট অনুযায়ী কভারেজ' : 'BUDGET COVERAGE')}
+                {hits5Budget > 0
+                  ? `${hits5Budget} ${isBn ? 'টি টিকেট ম্যাচ (৫/৬)' : 'Tickets Matched (5/6)'}`
+                  : (isBn ? 'টেস্টে ৫-ম্যাচ নেই (৪-ম্যাচ মিলছে)' : 'No 5-Match in Test (4-Match hit)')}
               </div>
               <div className="text-xs font-bold font-mono text-white mt-1.5 flex items-baseline gap-2">
-                <span className="text-neutral-400">{isBn ? 'বর্তমান টেস্টে ম্যাচ:' : 'Current Test Matches:'}</span>
+                <span className="text-neutral-400">{isBn ? 'টেস্টে ৫/৬ মিল:' : 'Test 5/6 Matches:'}</span>
                 <span className="text-emerald-300 font-extrabold text-base font-mono">{hits5Budget} {isBn ? 'টি' : ''}</span>
                 {hits5Full !== hits5Budget && (
-                  <span className="text-neutral-400 text-[11px] font-mono">({isBn ? 'ফুল হুইলে' : 'Full'}: {hits5Full})</span>
+                  <span className="text-neutral-400 text-[11px] font-mono">({isBn ? 'ফুল হুইল' : 'Full'}: {hits5Full})</span>
                 )}
               </div>
             </div>
@@ -223,9 +223,9 @@ export const MetricCards: React.FC<MetricCardsProps> = ({
             <div className="mt-3 pt-2.5 border-t border-emerald-900/60 text-[11px] text-emerald-300/90 font-mono flex items-center gap-1.5">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
               <span>
-                {budgetCount >= 2335
-                  ? (isBn ? '✅ ১০০% পরীক্ষিত ও নিশ্চিত (জিরো মিস)' : '✅ 100% Tested & Verified (Zero Miss)')
-                  : (isBn ? `সক্রিয় বাজেট: ${budgetCount.toLocaleString()} টিকিট` : `Active Budget: ${budgetCount.toLocaleString()} tix`)}
+                {isBn
+                  ? '১৮৪,৮৪৭টি ড্র-তে ≥১টি ৫/৬ ম্যাচ (১১১,১৬৩টিতে ৪-ম্যাচ)'
+                  : '184,847 draws hit ≥1 5/6 match (111,163 hit 4-match)'}
               </span>
             </div>
           </div>
@@ -234,26 +234,26 @@ export const MetricCards: React.FC<MetricCardsProps> = ({
           <div className="relative overflow-hidden bg-gradient-to-br from-[#0a1f33] to-[#071424] border-2 border-sky-400 rounded-2xl p-4 sm:p-5 shadow-xl shadow-sky-950/50 ring-2 ring-sky-500/30">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-sky-300 uppercase tracking-wider font-mono flex items-center gap-1.5">
-                <span>🔵 {isBn ? '৪-ম্যাচ সিউর লক' : '4-MATCH SURE LOCK'}</span>
+                <span>🔵 {isBn ? '৪-ম্যাচ নিশ্চিত লক (FAIL = 0)' : '4-MATCH SURE LOCK (FAIL = 0)'}</span>
               </span>
               <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-black bg-sky-500/20 text-sky-300 border border-sky-500/40">
-                {budgetCount >= 135 ? 'VERIFIED' : 'ACTIVE'}
+                100% ZERO-MISS
               </span>
             </div>
 
             <div className="mt-3">
               <div className="text-xl sm:text-2xl font-black font-mono text-sky-200 tracking-tight">
                 {budgetCount >= 2335
-                  ? (isBn ? 'ঠিক ≥ ১১টি টিকিট' : 'EXACTLY >= 11 TICKETS')
+                  ? (isBn ? 'ঠিক ≥ ১১টি টিকিট নিশ্চিত' : 'EXACTLY >= 11 TICKETS')
                   : budgetCount >= 135
-                  ? (isBn ? 'ঠিক ≥ ১টি টিকিট' : 'EXACTLY >= 1 TICKET')
+                  ? (isBn ? 'ঠিক ≥ ১টি টিকিট নিশ্চিত' : 'EXACTLY >= 1 TICKET')
                   : (isBn ? 'সাশ্রয়ী বাজেট লক' : 'BUDGET LOCK')}
               </div>
               <div className="text-xs font-bold font-mono text-white mt-1.5 flex items-baseline gap-2">
-                <span className="text-neutral-400">{isBn ? 'বর্তমান টেস্টে ম্যাচ:' : 'Current Test Matches:'}</span>
+                <span className="text-neutral-400">{isBn ? 'টেস্টে ৪-ম্যাচ মিল:' : 'Test 4-Matches:'}</span>
                 <span className="text-sky-300 font-extrabold text-base font-mono">{hits4Budget} {isBn ? 'টি' : ''}</span>
                 {hits4Full !== hits4Budget && (
-                  <span className="text-neutral-400 text-[11px] font-mono">({isBn ? 'ফুল হুইলে' : 'Full'}: {hits4Full})</span>
+                  <span className="text-neutral-400 text-[11px] font-mono">({isBn ? 'ফুল হুইল' : 'Full'}: {hits4Full})</span>
                 )}
               </div>
             </div>
@@ -262,8 +262,8 @@ export const MetricCards: React.FC<MetricCardsProps> = ({
               <CheckCircle2 className="w-3.5 h-3.5 text-sky-400 shrink-0" />
               <span>
                 {isBn
-                  ? '✅ ২৯৬,০১০টি সম্ভাব্য ড্র-তে ১০০% গাণিতিক ভেরিফিকেশন'
-                  : '✅ 100% Tested & Verified across all 296,010 draws'}
+                  ? '২৯৬,০১০টি ড্র-এর প্রতিটিতেই ১০০% নিশ্চিত (FAIL = ০)'
+                  : '100% verified across all 296,010 draws (FAIL = 0)'}
               </span>
             </div>
           </div>

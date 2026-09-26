@@ -3,8 +3,8 @@ import { Download, Globe } from 'lucide-react';
 import { GuaranteeGoal } from '../types';
 
 interface HeaderProps {
-  activeTab: 'dashboard' | 'or-theory' | 'python-source' | 'colab-mip' | 'cpp-engine';
-  setActiveTab: (tab: 'dashboard' | 'or-theory' | 'python-source' | 'colab-mip' | 'cpp-engine') => void;
+  activeTab: 'dashboard' | 'audit-296k' | 'or-theory' | 'python-source' | 'colab-mip' | 'cpp-engine';
+  setActiveTab: (tab: 'dashboard' | 'audit-296k' | 'or-theory' | 'python-source' | 'colab-mip' | 'cpp-engine') => void;
   onExportWheel: () => void;
   onExportBudget: () => void;
   budgetCount: number;
@@ -61,6 +61,17 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             {isBn ? 'লাইভ অ্যানালাইজার' : 'Live Analyzer'}
+          </button>
+          <button
+            onClick={() => setActiveTab('audit-296k')}
+            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+              activeTab === 'audit-296k'
+                ? 'bg-red-500 text-black font-black shadow-md shadow-red-950/60'
+                : 'text-red-400 hover:text-white hover:bg-red-950/50 border border-red-500/40'
+            }`}
+          >
+            <span>🔍</span>
+            <span>{isBn ? '২৯৬,০১০ অডিট' : '296,010 Audit'}</span>
           </button>
           <button
             onClick={() => setActiveTab('or-theory')}

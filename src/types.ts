@@ -78,3 +78,18 @@ export interface MatchCounts {
   1: number;
   0: number;
 }
+
+export interface ExhaustiveAuditResult {
+  totalResults: number; // 296,010
+  passResults: number; // Draws where at least 1 ticket matches >= 5
+  failResults: number; // Draws where 0 tickets match >= 5
+  passRate: number; // %
+  failRate: number; // %
+  isZeroFailGuarantee: boolean; // failResults === 0
+  drawsWith6Match: number;
+  drawsWith5Match: number;
+  drawsWith4MatchMax: number;
+  drawsWith3OrLessMax: number;
+  executionTimeMs: number;
+  auditRule: string;
+}

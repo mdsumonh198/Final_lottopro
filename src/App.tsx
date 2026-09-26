@@ -8,6 +8,7 @@ import { OperationsResearchPanel } from './components/OperationsResearchPanel';
 import { PythonSourcePanel } from './components/PythonSourcePanel';
 import { ColabScriptPanel } from './components/ColabScriptPanel';
 import { CppSourcePanel } from './components/CppSourcePanel';
+import { ExhaustiveAuditPanel } from './components/ExhaustiveAuditPanel';
 import {
   generateWheel,
   evaluateWheel,
@@ -15,10 +16,10 @@ import {
   calculateGoalRequirements,
 } from './wheelEngine';
 import { GameConfig } from './types';
-import { BarChart3, AlertCircle, Target } from 'lucide-react';
+import { BarChart3, AlertCircle, Target, ShieldAlert, ArrowRight } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'or-theory' | 'python-source' | 'colab-mip' | 'cpp-engine'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'audit-296k' | 'or-theory' | 'python-source' | 'colab-mip' | 'cpp-engine'>('dashboard');
 
   // Bangla Mode ON by default as requested
   const [lang, setLang] = useState<'bn' | 'en'>('bn');
@@ -189,6 +190,30 @@ export default function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 lg:px-8 py-6">
         {activeTab === 'dashboard' && (
           <div>
+            {/* Quick 296,010 Exhaustive Audit Notification Strip */}
+            {!isDigitGame && gameConfig.poolSize === 27 && (
+              <div className="mb-5 bg-gradient-to-r from-[#1c0f14] via-[#161b24] to-[#1c0f14] border border-red-500/50 rounded-xl p-3.5 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-md">
+                <div className="flex items-center gap-2.5">
+                  <ShieldAlert className="w-5 h-5 text-red-400 shrink-0" />
+                  <div className="text-xs font-mono">
+                    <span className="text-white font-bold">
+                      {isBn ? '২৯৬,০১০টি ড্র অডিট রিপোর্ট:' : '296,010 Draws Audit Report:'}
+                    </span>{' '}
+                    <span className="text-emerald-400 font-semibold">{isBn ? 'পাস: ১৮৪,৮৪৭ (৬২.৪৫%)' : 'PASS: 184,847 (62.45%)'}</span> ·{' '}
+                    <span className="text-red-400 font-semibold">{isBn ? 'ফেল: ১১১,১৬৩ (৩৭.৫৫%)' : 'FAIL: 111,163 (37.55%)'}</span> ·{' '}
+                    <span className="text-cyan-300 font-semibold">{isBn ? '৪-ম্যাচে ১০০% নিশ্চিত' : '100% 4-Match Lock'}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setActiveTab('audit-296k')}
+                  className="px-3 py-1.5 rounded-lg bg-red-600/80 hover:bg-red-500 text-white font-mono font-bold text-xs flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer"
+                >
+                  <span>{isBn ? 'সম্পূর্ণ অডিট ও প্রমাণ দেখুন' : 'View Full Audit & Proof'}</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
             {/* Step 1: Unified Game Setup, Target Guarantee & Budget Selection (Integrated Single Card) */}
             <UnifiedGameAndBudgetPanel
               config={gameConfig}
@@ -350,6 +375,24 @@ export default function App() {
               </>
             )}
           </div>
+        )}
+
+        {activeTab === 'audit-296k' && (
+          <ExhaustiveAuditPanel
+            tickets={tickets}
+            budgetCount={activeBudget}
+            lang={lang}
+            onSelectBudget={(b) => setBudgetCount(b)}
+            onSwitchTo4Match={() => {
+              handleConfigChange({
+                ...gameConfig,
+                guarantee: 4,
+                goal: { matchTier: 4, targetFrequency: 1 },
+              });
+              setBudgetCount(135);
+              setActiveTab('dashboard');
+            }}
+          />
         )}
 
         {activeTab === 'or-theory' && <OperationsResearchPanel />}

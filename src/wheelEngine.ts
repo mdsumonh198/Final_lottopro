@@ -6,6 +6,7 @@ import {
   GamePreset,
   TicketGeneratorOptions,
   GuaranteeGoal,
+  ExhaustiveAuditResult,
 } from './types';
 
 // Standard Lottery & Digit Game Presets
@@ -777,78 +778,8 @@ export function evaluateWheel(
   const winCounts = new Map<number, number>();
   winningNumbers.forEach((n) => winCounts.set(n, (winCounts.get(n) || 0) + 1));
 
-  // --- ZERO-MISS GUARANTEE ASSURANCE ENGINE ---
-  // Ensure that when user evaluates ANY draw with budget >= target recommendation (or full wheel),
-  // there is strictly ZERO GAP: at least targetFrequency tickets match >= targetTier.
-  let workingTickets = tickets;
-  if (!isDigitGame && winningNumbers.length >= targetTier && tickets.length > 0) {
-    const winSet = new Set(winningNumbers);
-    let budgetMatchesCount = 0;
-    for (let i = 0; i < Math.min(budgetCount, tickets.length); i++) {
-      const matchCount = tickets[i].numbers.filter((n) => winSet.has(n)).length;
-      if (matchCount >= targetTier) {
-        budgetMatchesCount++;
-      }
-    }
-
-    // If there is any gap where targetFrequency is not met in budget
-    if (budgetMatchesCount < targetFreq && budgetCount >= 10) {
-      const neededHits = targetFreq - budgetMatchesCount;
-      const effectiveBudget = Math.min(budgetCount, tickets.length);
-
-      // Clone tickets so we don't mutate input by reference outside
-      workingTickets = tickets.map((t) => ({ ...t, numbers: [...t.numbers] }));
-
-      // Find indices in budget with the fewest matches (e.g. 0 or 1 match) to replace with guaranteed hits
-      const budgetIndices = Array.from({ length: effectiveBudget }, (_, i) => i).sort((a, b) => {
-        const ma = workingTickets[a].numbers.filter((n) => winSet.has(n)).length;
-        const mb = workingTickets[b].numbers.filter((n) => winSet.has(n)).length;
-        return ma - mb;
-      });
-
-      // Find pool numbers not in winning numbers
-      const maxPoolNum = Math.max(...tickets.flatMap((t) => t.numbers), ...winningNumbers, 27);
-      const nonWinningPool = Array.from({ length: maxPoolNum }, (_, i) => i + 1).filter((n) => !winSet.has(n));
-
-      const pickSize = winningNumbers.length;
-      for (let k = 0; k < neededHits && k < budgetIndices.length; k++) {
-        const targetIdx = budgetIndices[k];
-        // Generate targetTier numbers from winning numbers
-        // Cycle subsets of winningNumbers of size targetTier
-        const shift = k % pickSize;
-        const chosenWinning = Array.from({ length: targetTier }, (_, i) => winningNumbers[(shift + i) % pickSize]);
-        const fillCount = pickSize - targetTier;
-
-        // Pick fillCount distinct numbers from nonWinningPool without running out or duplicating
-        const chosenFiller: number[] = [];
-        const startOffset = (k * Math.max(1, fillCount)) % Math.max(1, nonWinningPool.length);
-        for (let f = 0; f < nonWinningPool.length && chosenFiller.length < fillCount; f++) {
-          const num = nonWinningPool[(startOffset + f) % nonWinningPool.length];
-          if (!chosenFiller.includes(num) && !chosenWinning.includes(num)) {
-            chosenFiller.push(num);
-          }
-        }
-
-        const guaranteedNumbers = [...chosenWinning, ...chosenFiller].sort((a, b) => a - b);
-        // Fallback safety: ensure guaranteedNumbers always has exactly pickSize distinct numbers
-        if (guaranteedNumbers.length < pickSize) {
-          for (let p = 1; p <= maxPoolNum && guaranteedNumbers.length < pickSize; p++) {
-            if (!guaranteedNumbers.includes(p)) {
-              guaranteedNumbers.push(p);
-            }
-          }
-          guaranteedNumbers.sort((a, b) => a - b);
-        }
-
-        workingTickets[targetIdx] = {
-          ...workingTickets[targetIdx],
-          numbers: guaranteedNumbers,
-        };
-      }
-    }
-  }
-
-  for (const ticket of workingTickets) {
+  // Tickets are evaluated purely as-is against winning numbers with ZERO alteration
+  for (const ticket of tickets) {
     if (isDigitGame) {
       // --- DIGIT EVALUATION (Order matters vs Box) ---
       const positionMatchFlags = ticket.numbers.map((n, idx) => n === winningNumbers[idx]);
@@ -952,7 +883,7 @@ export function evaluateWheel(
     recommendedTickets: 0,
   };
 
-  return { evaluations, fullMatchCounts, budgetMatchCounts, goalSummary, tickets: workingTickets };
+  return { evaluations, fullMatchCounts, budgetMatchCounts, goalSummary, tickets };
 }
 
 /**
@@ -1042,4 +973,136 @@ export function exportEvaluationsToCSV(evaluations: TicketEvaluation[]): string 
  */
 export function exportSmartStopWheelToCSV(evaluations: TicketEvaluation[]): string {
   return exportEvaluationsToCSV(evaluations);
+}
+
+/**
+ * Exhaustively checks ALL 296,010 possible 6-number results (combinations of 6 from 1..27)
+ * against the provided ticket set (e.g. 2,335 tickets).
+ *
+ * Exact User Rule:
+ * - If in any result at least 1 ticket matches 5 or 6 numbers => PASS
+ * - If not even one ticket matches 5 or 6 numbers => FAIL
+ * - 4-match is strictly counted as FAIL for 5-match guarantee (NEVER misclassified as 5-match)
+ */
+export function runExhaustiveAudit296010(tickets: Ticket[]): ExhaustiveAuditResult {
+  const t0 = performance.now();
+  const ticketSet6 = new Set<number>();
+  const covered5 = new Set<number>();
+  const covered4 = new Set<number>();
+
+  for (let i = 0; i < tickets.length; i++) {
+    const t = tickets[i].numbers;
+    let mask6 = 0;
+    for (let j = 0; j < 6; j++) {
+      mask6 |= (1 << (t[j] - 1));
+    }
+    ticketSet6.add(mask6);
+
+    for (let skip = 0; skip < 6; skip++) {
+      let subMask5 = 0;
+      for (let j = 0; j < 6; j++) {
+        if (j !== skip) subMask5 |= (1 << (t[j] - 1));
+      }
+      covered5.add(subMask5);
+    }
+
+    for (let i1 = 0; i1 < 6; i1++) {
+      for (let i2 = i1 + 1; i2 < 6; i2++) {
+        for (let i3 = i2 + 1; i3 < 6; i3++) {
+          for (let i4 = i3 + 1; i4 < 6; i4++) {
+            const subMask4 = (1 << (t[i1]-1)) | (1 << (t[i2]-1)) | (1 << (t[i3]-1)) | (1 << (t[i4]-1));
+            covered4.add(subMask4);
+          }
+        }
+      }
+    }
+  }
+
+  let totalResults = 0;
+  let drawsWith6Match = 0;
+  let drawsWith5Match = 0;
+  let drawsWith4MatchMax = 0;
+  let drawsWith3OrLessMax = 0;
+  let passResults = 0;
+  let failResults = 0;
+
+  for (let a = 0; a < 22; a++) {
+    const ma = 1 << a;
+    for (let b = a + 1; b < 23; b++) {
+      const mab = ma | (1 << b);
+      for (let c = b + 1; c < 24; c++) {
+        const mabc = mab | (1 << c);
+        for (let d = c + 1; d < 25; d++) {
+          const mabcd = mabc | (1 << d);
+          for (let e = d + 1; e < 26; e++) {
+            const mabcde = mabcd | (1 << e);
+            for (let f = e + 1; f < 27; f++) {
+              totalResults++;
+              const mf = 1 << f;
+              const drawMask = mabcde | mf;
+
+              if (ticketSet6.has(drawMask)) {
+                drawsWith6Match++;
+                passResults++;
+              } else if (
+                covered5.has(mabcde) ||
+                covered5.has(mabcd | mf) ||
+                covered5.has(mabc | (1 << e) | mf) ||
+                covered5.has(mab | (1 << d) | (1 << e) | mf) ||
+                covered5.has(ma | (1 << c) | (1 << d) | (1 << e) | mf) ||
+                covered5.has((1 << b) | (1 << c) | (1 << d) | (1 << e) | mf)
+              ) {
+                drawsWith5Match++;
+                passResults++;
+              } else {
+                failResults++;
+                const draw = [a, b, c, d, e, f];
+                let has4 = false;
+                for (let i1 = 0; i1 < 6; i1++) {
+                  for (let i2 = i1 + 1; i2 < 6; i2++) {
+                    for (let i3 = i2 + 1; i3 < 6; i3++) {
+                      for (let i4 = i3 + 1; i4 < 6; i4++) {
+                        const sm = (1 << draw[i1]) | (1 << draw[i2]) | (1 << draw[i3]) | (1 << draw[i4]);
+                        if (covered4.has(sm)) {
+                          has4 = true;
+                          break;
+                        }
+                      }
+                      if (has4) break;
+                    }
+                    if (has4) break;
+                  }
+                  if (has4) break;
+                }
+                if (has4) {
+                  drawsWith4MatchMax++;
+                } else {
+                  drawsWith3OrLessMax++;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const executionTimeMs = Math.round(performance.now() - t0);
+  const passRate = Number(((passResults / totalResults) * 100).toFixed(2));
+  const failRate = Number(((failResults / totalResults) * 100).toFixed(2));
+
+  return {
+    totalResults,
+    passResults,
+    failResults,
+    passRate,
+    failRate,
+    isZeroFailGuarantee: failResults === 0,
+    drawsWith6Match,
+    drawsWith5Match,
+    drawsWith4MatchMax,
+    drawsWith3OrLessMax,
+    executionTimeMs,
+    auditRule: 'কোনো রেজাল্টে অন্তত ১টি টিকেটে ৫ বা ৬ ম্যাচ হলে PASS, একটিও না হলে FAIL (৪-ম্যাচ কখনও ৫-ম্যাচ নয়)',
+  };
 }
